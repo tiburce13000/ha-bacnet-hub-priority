@@ -53,7 +53,7 @@ EVENT_LABEL_REGISTRY_UPDATED = "label_registry_updated"
 EVENT_AREA_REGISTRY_UPDATED = "area_registry_updated"
 EVENT_SYNC_DEBOUNCE_SECONDS = 2.0
 
-PLATFORMS: List[str] = ["sensor", "number", "switch", "select", "text", "binary_sensor"]
+PLATFORMS: List[str] = ["sensor", "number", "switch", "select", "text", "binary_sensor", "button"]
 
 # Optional: if True, we write the updated friendly_names
 # back to entry.options (once). We then suppress the reload.

@@ -523,6 +523,62 @@ class BacnetClientPointEntityBase:
             {"client_id": self._client_id},
         )
 
+    async def _async_release_present_value(self) -> None:
+        """Fork : relâche la commande en écrivant Null à la priorité configurée.
+
+        L'automate (ex. Distech) reprend alors la main avec sa propre valeur
+        inscrite à un niveau de priorité inférieur. Indispensable pour rendre
+        la main en fin de mode (ex. mode été) ou en sécurité (sonde indisponible).
+        """
+        point = self._get_point()
+        if not point:
+            raise HomeAssistantError("Point payload unavailable")
+
+        server = self.hass.data.get(DOMAIN, {}).get("servers", {}).get(self._entry_id)
+        app = getattr(server, "app", None) if server is not None else None
+        if app is None:
+            raise HomeAssistantError("BACnet app unavailable")
+
+        address = _safe_text(point.get("client_address"))
+        object_type = _safe_text(point.get("object_type"))
+        object_instance = _to_int(point.get("object_instance"))
+        if not address or not object_type or object_instance is None:
+            raise HomeAssistantError("Point addressing incomplete")
+
+        type_slug = str(point.get("type_slug") or "").strip().lower()
+        has_priority_array = bool(point.get("has_priority_array"))
+        if type_slug not in {"ao", "bo", "av", "bv", "mv"} or not has_priority_array:
+            raise HomeAssistantError(
+                "Ce point ne gère pas de Priority Array : relâchement impossible"
+            )
+
+        from .write_priority import get_write_priority
+
+        write_priority = get_write_priority(self.hass, self._entry_id, self._client_id)
+
+        try:
+            from bacpypes3.primitivedata import Null
+
+            null_value: Any = Null(())
+        except Exception as err:  # pragma: no cover
+            raise HomeAssistantError(f"Null BACnet indisponible : {err}") from err
+
+        await _write_client_point_present_value(
+            app,
+            address,
+            object_type,
+            int(object_instance),
+            null_value,
+            priority=write_priority,
+        )
+
+        _LOGGER.debug(
+            "Relâchement (Null) écrit sur %s,%s à la priorité %s",
+            object_type,
+            object_instance,
+            write_priority,
+        )
+
     @callback
     def _handle_points_update(self) -> None:
         point = self._get_point()
