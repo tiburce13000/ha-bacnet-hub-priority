@@ -33,7 +33,12 @@ CLIENT_POINT_REFRESH_TIMEOUT_SECONDS = 6.0
 CLIENT_POINT_SCAN_LIMIT = 128
 CLIENT_REDISCOVERY_INTERVAL = timedelta(minutes=15)
 CLIENT_REFRESH_MIN_SECONDS = 55.0
-CLIENT_COV_LEASE_SECONDS = 300
+CLIENT_COV_LEASE_SECONDS = 600
+# Fraction du lease à laquelle on RENOUVELLE la souscription COV (make-before-break).
+# 0.8 = on ré-enregistre à 80% du lease, avant expiration, pour éviter le trou
+# d'indisponibilité (la nouvelle souscription est posée pendant que l'ancienne est
+# encore valide). Corrige le "yoyo" disponible/indisponible des entités.
+CLIENT_COV_RENEW_FRACTION = 0.8
 
 CLIENT_DIAGNOSTIC_FIELDS: list[tuple[str, str]] = list(HUB_DIAGNOSTIC_FIELDS)
 NETWORK_DIAGNOSTIC_KEYS = {"ip_address", "ip_subnet_mask", "mac_address_raw"}

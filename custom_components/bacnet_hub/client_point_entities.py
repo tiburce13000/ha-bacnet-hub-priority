@@ -21,6 +21,7 @@ from homeassistant.helpers.typing import StateType
 from .const import DOMAIN, client_display_name
 from .client_runtime import (
     CLIENT_COV_LEASE_SECONDS,
+    CLIENT_COV_RENEW_FRACTION,
     _client_cache_get,
     _client_cov_signal,
     _client_points_get,
@@ -380,7 +381,13 @@ class BacnetClientPointEntityBase:
                 pass
             self._cov_lease_unsub = None
 
-        delay = max(1.0, float(CLIENT_COV_LEASE_SECONDS))
+        # Make-before-break : on renouvelle AVANT l'expiration (à 80% du lease),
+        # pour que la nouvelle souscription soit posée tant que l'ancienne est encore
+        # valide -> supprime le trou d'indisponibilité (yoyo) à chaque renouvellement.
+        fraction = float(CLIENT_COV_RENEW_FRACTION)
+        if not (0.1 <= fraction <= 0.95):
+            fraction = 0.8
+        delay = max(1.0, float(CLIENT_COV_LEASE_SECONDS) * fraction)
 
         @callback
         def _lease_expired(_now) -> None:
@@ -481,7 +488,17 @@ class BacnetClientPointEntityBase:
 
         type_slug = str(point.get("type_slug") or "").strip().lower()
         has_priority_array = bool(point.get("has_priority_array"))
-        write_priority = 16 if type_slug in {"ao", "bo"} and has_priority_array else None
+        # Fork : priorité d'écriture device-level (sélecteur "Priorité d'écriture"),
+        # défaut 16. Appliquée à tous les objets commandables disposant d'un
+        # Priority Array (ao, bo, av, bv, mv), pas seulement ao/bo.
+        if type_slug in {"ao", "bo", "av", "bv", "mv"} and has_priority_array:
+            from .write_priority import get_write_priority
+
+            write_priority = get_write_priority(
+                self.hass, self._entry_id, self._client_id
+            )
+        else:
+            write_priority = None
 
         await _write_client_point_present_value(
             app,

@@ -17,6 +17,7 @@ from .const import (
 )
 from .published_point_entities import BacnetPublishedSelectObserver
 from .client_runtime import _entry_client_points, _entry_points_signal, _point_platform, _to_int
+from .write_priority_entity import BacnetClientWritePrioritySelect
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities) -> None:
@@ -59,12 +60,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         async_add_entities(published_entities)
 
     added: set[tuple[str, str]] = set()
+    # Devices déjà dotés de leur sélecteur "Priorité d'écriture" (un seul par device).
+    added_priority: set[str] = set()
 
     @callback
     def _add_missing(_payload=None) -> None:
-        entities: list[BacnetClientPointSelect] = []
+        entities: list[Any] = []
         per_entry = _entry_client_points(hass, entry.entry_id)
         for client_id, point_cache in per_entry.items():
+            # Fork : un sélecteur "Priorité d'écriture" par device client (device-level),
+            # dès qu'au moins un point du device est connu.
+            if str(client_id) not in added_priority and point_cache:
+                first_point = next(iter(point_cache.values()), {}) or {}
+                dev_instance = _to_int(first_point.get("client_instance"))
+                if dev_instance is None:
+                    dev_instance = _to_int(str(client_id).split("_")[-1]) or 0
+                entities.append(
+                    BacnetClientWritePrioritySelect(
+                        hass=hass,
+                        entry_id=entry.entry_id,
+                        client_id=str(client_id),
+                        client_instance=int(dev_instance),
+                    )
+                )
+                added_priority.add(str(client_id))
+
             for point_key, point in sorted(point_cache.items()):
                 if _point_platform(dict(point or {})) != "select":
                     continue
