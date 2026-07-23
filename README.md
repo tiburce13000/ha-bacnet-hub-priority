@@ -63,6 +63,27 @@ Par rapport à l'intégration originale de @magliaral :
 | `custom_components/bacnet_hub/client_point_entities.py` | **modif** | La priorité d'écriture est **lue depuis le sélecteur** au lieu d'être figée à 16 ; portée étendue à `ao/bo/av/bv/mv`. |
 | `manifest.json`, `hacs.json` | **modif** | Identité du fork. |
 
+### Bouton « Relâcher » (libération du Priority Array)
+
+Chaque point commandable disposant d'un Priority Array reçoit un **bouton « Relâcher »**
+(`button`, désactivé par défaut, catégorie *Configuration*).
+
+Un appui écrit **Null** dans le Priority Array **à la priorité configurée** : Home Assistant
+libère le niveau qu'il occupait et **l'automate reprend la main** avec sa propre valeur
+(inscrite à un niveau inférieur).
+
+C'est le pendant indispensable du sélecteur de priorité :
+- rendre la main à l'automate en fin de mode (ex. sortie d'un mode saisonnier) ;
+- sécurité : si une sonde de référence devient indisponible, on relâche la commande
+  au lieu de laisser une valeur figée.
+
+| Fichier | Nature | Description |
+| --- | --- | --- |
+| `custom_components/bacnet_hub/release_button_entity.py` | **ajout** | Entité bouton « Relâcher ». |
+| `custom_components/bacnet_hub/button.py` | **ajout** | Plateforme `button` (création par point commandable). |
+| `custom_components/bacnet_hub/__init__.py` | **modif** | Ajout de `button` à `PLATFORMS`. |
+| `custom_components/bacnet_hub/client_point_entities.py` | **modif** | Méthode `_async_release_present_value()` (écriture Null à la priorité configurée). |
+
 ### Stabilité des entités (correction du « yoyo » COV)
 
 Les entités importées pouvaient passer par intermittence à *indisponible* : la souscription
