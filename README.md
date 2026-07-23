@@ -1,236 +1,121 @@
-# BACnet Hub for Home Assistant
+# BACnet Hub Priority
 
-Expose Home Assistant entities as BACnet objects on a local BACnet/IP device and import remote BACnet client points back into Home Assistant.
+> **Nom du dépôt** : `ha-bacnet-hub-priority` — **Intégration** : `BACnet Hub Priority`
+> *(le `domain` interne reste `bacnet_hub` : compatibilité totale des entités avec l'intégration d'origine)*
 
-Built with `bacpypes3`.
 
-## What This Integration Does
+Fork de [**magliaral/ha-bacnet-hub**](https://github.com/magliaral/ha-bacnet-hub) qui ajoute
+un **sélecteur de priorité d'écriture BACnet** (device-level) à chaque device découvert.
 
-This integration has two roles:
+Ce fork combine :
+- la **découverte et la lecture** robustes de l'intégration originale de **@magliaral** ;
+- le **contrôle de la priorité d'écriture** (BACnet Priority Array), dont le concept est
+  repris de l'intégration de **@CervezaStallone**.
 
-1. Home Assistant -> BACnet (local BACnet device)
-- Publishes selected HA entities as BACnet objects.
-- Keeps BACnet present values synchronized from HA state changes.
-- Supports BACnet -> HA writeback for supported mappings.
+> 📄 La documentation d'origine complète de l'intégration est conservée dans
+> [`README_ORIGINAL_magliaral.md`](README_ORIGINAL_magliaral.md).
 
-2. BACnet -> Home Assistant (remote BACnet clients)
-- Discovers remote BACnet devices via `Who-Is/I-Am`.
-- Imports supported remote points as HA entities.
-- Uses BACnet COV subscriptions for event-driven updates.
+---
 
-## Key Features
+## 🙏 Remerciements
 
-- Labels-first auto mapping (no manual mapping UI).
-- Automatic mapping lifecycle: add, refresh, remove, cleanup.
-- Event-driven sync with debounce on registry/label/area changes.
-- Deterministic entity IDs and stable unique IDs.
-- Built-in diagnostics for hub and discovered clients.
-- Integration service: `bacnet_hub.reload`.
+Ce fork n'existe que grâce au travail de deux développeurs de la communauté open source,
+que je remercie chaleureusement :
 
-## Requirements
+- **[Alessio Magliarella (@magliaral)](https://github.com/magliaral/ha-bacnet-hub)** —
+  auteur de l'intégration **BACnet Hub** d'origine, qui constitue **toute la base** de ce
+  fork (découverte des devices, import des points, lecture temps réel, publication HA↔BACnet).
+  Licence d'origine : MIT.
 
-- Home Assistant with custom integrations enabled.
-- Network access to BACnet/IP segment.
-- Dependency (from `manifest.json`):
-  - `bacpypes3==0.0.102`
+- **[CervezaStallone](https://github.com/CervezaStallone/Home-Assistant-BACnet-integration)** —
+  auteur de l'intégration **Home Assistant BACnet**, dont le **concept de sélecteur de
+  priorité d'écriture device-level** a inspiré la fonctionnalité ajoutée ici.
+  Licence : GPL v3.
 
-## Installation
+Tout le mérite de l'architecture revient à ces deux auteurs. Ce fork se contente d'assembler
+et d'adapter leurs approches pour un besoin précis (piloter la ventilation d'un automate
+Distech au niveau de priorité « Manual Operator »).
 
-### HACS (custom repository)
+---
 
-1. HACS -> Integrations -> Custom repositories.
-2. Add this repository as type `Integration`.
-3. Install `BACnet Hub`.
-4. Restart Home Assistant.
-5. Settings -> Devices & Services -> Add Integration -> `BACnet Hub`.
+## ➕ Ce qui a été ajouté / modifié dans ce fork
 
-### Manual
+Par rapport à l'intégration originale de @magliaral :
 
-Copy `custom_components/bacnet_hub` to:
+### Nouveauté fonctionnelle
+- **Entité `select` « Priorité d'écriture »** créée pour chaque device BACnet découvert
+  (device-level, comme chez @CervezaStallone).
+  - **Désactivée par défaut** (catégorie *Configuration*) — à activer manuellement.
+  - Options : **8 à 16** (8 = *Manual Operator*).
+  - **Défaut : 16** — donc **comportement d'origine strictement inchangé** tant que
+    l'utilisateur n'active ni ne modifie ce sélecteur.
+  - La priorité choisie **persiste** après redémarrage (`RestoreEntity`).
+  - Quand elle est réglée sur une valeur, **toutes les écritures commandables** vers ce
+    device (objets `ao`, `bo`, `av`, `bv`, `mv` disposant d'un Priority Array) utilisent
+    cette priorité.
 
-`config/custom_components/bacnet_hub`
+### Détail technique des changements
+| Fichier | Nature | Description |
+| --- | --- | --- |
+| `custom_components/bacnet_hub/write_priority.py` | **ajout** | Stockage/lecture de la priorité par device (dans `hass.data`). |
+| `custom_components/bacnet_hub/write_priority_entity.py` | **ajout** | Entité `select` « Priorité d'écriture » (device-level, RestoreEntity). |
+| `custom_components/bacnet_hub/select.py` | **modif** | Création d'une entité priorité par device découvert. |
+| `custom_components/bacnet_hub/client_point_entities.py` | **modif** | La priorité d'écriture est **lue depuis le sélecteur** au lieu d'être figée à 16 ; portée étendue à `ao/bo/av/bv/mv`. |
+| `manifest.json`, `hacs.json` | **modif** | Identité du fork. |
 
-Then restart Home Assistant.
+### Stabilité des entités (correction du « yoyo » COV)
 
-## Configuration
+Les entités importées pouvaient passer par intermittence à *indisponible* : la souscription
+COV était renouvelée **à l'expiration** du bail, créant un court trou pendant la
+ré-inscription.
 
-### Initial setup
+Ce fork corrige cela :
+- **Bail COV porté de 300 s à 600 s** (`CLIENT_COV_LEASE_SECONDS`) : moins de renouvellements.
+- **Renouvellement anticipé « make-before-break »** à **80 %** du bail
+  (`CLIENT_COV_RENEW_FRACTION = 0.8`, soit 480 s) : la nouvelle souscription est posée
+  **avant** que l'ancienne n'expire, donc plus de coupure ni d'état *indisponible* transitoire.
 
-Required fields:
-- `instance` (BACnet device instance, `0..4194302`)
-- `address` (`IPv4[/prefix][:port]`, example: `192.168.31.36/24:47808`)
-- `device_name` (BACnet device `objectName`)
-- `device_description` (BACnet device `description`)
+| Fichier | Nature | Description |
+| --- | --- | --- |
+| `custom_components/bacnet_hub/client_runtime.py` | **modif** | Bail COV 600 s + constante `CLIENT_COV_RENEW_FRACTION`. |
+| `custom_components/bacnet_hub/client_point_entities.py` | **modif** | Renouvellement COV anticipé (make-before-break). |
 
-Defaults:
-- `device_name`: `HA-BACnet-Hub`
-- `device_description`: `BACnet Hub - Home Assistant Custom Integration`
+Aucune ligne de code de @CervezaStallone n'a été copiée : les deux fichiers ajoutés sont
+écrits spécifiquement pour la structure de l'intégration de @magliaral. Seul le **concept**
+(un sélecteur de priorité device-level) a servi d'inspiration.
 
-### Label import model
+---
 
-The integration runs in labels mode and auto-manages mappings from selected labels.
+## 📜 Licence
 
-- On setup/options, at least one label must be selected.
-- A default label is auto-created if possible:
-  - Name: `BACnet`
-  - Icon: `mdi:server-network-outline`
-  - Color: `light-green`
-- Entities can be discovered by direct entity label, by device label, or by labels assigned to the linked area (entity area or device area).
+Ce fork est distribué sous **GNU General Public License v3 (GPL v3)** — voir le fichier
+[`LICENSE`](LICENSE).
 
-## Home Assistant -> BACnet Mapping
+Raisons de ce choix :
+- L'intégration d'origine de @magliaral est sous **MIT**, une licence permissive qui
+  **autorise** la redistribution sous une licence plus restrictive comme la GPL v3.
+- L'intégration de @CervezaStallone, source d'inspiration, est sous **GPL v3**.
+- Publier ce fork en **GPL v3** garantit que **le code reste ouvert et accessible à tous**,
+  ainsi que tout dérivé futur — dans le respect de l'esprit open source des deux projets.
 
-### Automatic object type selection (generic entities)
+La licence MIT d'origine de @magliaral est conservée dans
+[`LICENSE_ORIGINAL_magliaral`](LICENSE_ORIGINAL_magliaral) et son copyright reste reconnu.
 
-- Binary-like domains -> `binaryValue`:
-  - `binary_sensor`, `switch`, `light`, `lock`, `cover`, `input_boolean`, `alarm_control_panel`, `device_tracker`, `button`
-- Numeric/unit-based states -> `analogValue`
-- Fallback -> `binaryValue`
+---
 
-### Climate mapping
+## 🔧 Installation (HACS)
 
-For `climate.*`, multiple BACnet mappings can be created:
+1. HACS → menu ⋮ → **Dépôts personnalisés** → ajouter l'URL de ce dépôt, catégorie
+   *Integration*.
+2. Installer **BACnet Hub Priority** → redémarrer Home Assistant.
+3. Ajouter l'intégration, configurer l'adresse locale (ex. `192.168.1.100/24:47808`).
+4. Pour utiliser la priorité : activer l'entité **« Priorité d'écriture »** du device et
+   choisir le niveau voulu (ex. **8** pour *Manual Operator*).
 
-- `hvac_mode`
-  - `binaryValue` for simple `off/heat`
-  - otherwise `multiStateValue` with dynamic `stateText`
-- `hvac_action` -> `binaryValue` (read-only mirror)
-- `current_temperature` -> `analogValue`
-- `set_temperature` (reads HA attribute `temperature`) -> `analogValue`
+---
 
-### BACnet object support (publisher)
+## ⚠️ Avertissement
 
-- `analogValue`
-- `binaryValue`
-- `multiStateValue`
-
-Published mappings are mirrored as observer entities and split by platform:
-- `sensor` / `binary_sensor` only (non-interactive read-only observers)
-- configuration-like observers use `entity_category=config` (for example climate setpoints/modes)
-
-Note: This avoids confusing UI behavior where toggles/sliders can be clicked but immediately snap back.
-
-## BACnet -> Home Assistant Writeback (for published mappings)
-
-Write requests are accepted only if mapping/service checks pass; otherwise BACnet write is denied (`writeAccessDenied`).
-
-Supported write targets:
-
-- `light`, `switch`, `fan`, `group` -> `turn_on` / `turn_off`
-- `cover` -> `open_cover` / `close_cover`
-- `number`, `input_number` -> `set_value`
-- `climate`:
-  - HVAC mode mapping -> `set_hvac_mode`
-  - setpoint mapping -> `set_temperature`
-
-## BACnet Client Discovery and Point Import
-
-The integration discovers remote BACnet devices and imports supported points into HA.
-
-### Supported remote BACnet point types
-
-- `analog-input` (`ai`)
-- `analog-output` (`ao`)
-- `analog-value` (`av`)
-- `binary-input` (`bi`)
-- `binary-output` (`bo`)
-- `binary-value` (`bv`)
-- `multi-state-value` (`mv`)
-- `characterstring-value` (`csv`)
-
-### Imported platform mapping
-
-- `ai` -> `sensor` (read-only)
-- `ao` -> `number` if writable, else `sensor`
-- `av` -> `number` (writable)
-- `bi` -> `binary_sensor` (read-only)
-- `bo` -> `switch` if writable, else `binary_sensor`
-- `bv` -> `switch` (writable)
-- `mv` -> `select` (writable)
-- `csv` -> `text` (writable)
-
-Writable conditions:
-- `ao` / `bo` require `priorityArray` support.
-- `av`, `bv`, `mv`, `csv` are writable by design.
-
-Implementation detail:
-- Imported client point entities are created with `entity_registry_enabled_default = false` (disabled by default until enabled in HA).
-
-## Synchronization Model
-
-- Initial auto-sync runs during setup.
-- Mapping refresh is triggered by:
-  - `entity_registry_updated`
-  - `device_registry_updated`
-  - `label_registry_updated`
-  - `area_registry_updated`
-- Debounce: 2 seconds.
-- Stale/orphan published entities are automatically cleaned up.
-
-## Diagnostics
-
-### Hub diagnostics
-
-Provides diagnostic sensors (examples):
-
-- description
-- firmware revision
-- model name
-- object identifier / object name
-- system status
-- vendor identifier / vendor name
-- IP address / subnet mask / MAC address
-
-### Client diagnostics
-
-For discovered clients, diagnostic sensors include similar device and network fields.
-
-## Entity IDs and Unique IDs
-
-Published mirror entities use deterministic IDs based on hub instance + BACnet object instance:
-
-- `sensor.bacnet_doi_<hub_instance>_av_<instance>`
-- `binary_sensor.bacnet_doi_<hub_instance>_bv_<instance>`
-
-Client point entities:
-
-- `<platform>.bacnet_doi_<client_instance>_<type_slug>_<object_instance>`
-
-Published unique IDs are stable and hub-scoped:
-
-- `bacnet_hub:hub:<hub_key>:<object-type>:<instance>`
-
-## Services
-
-### `bacnet_hub.reload`
-
-Reload one BACnet Hub config entry.
-
-Fields:
-- `entry_id` (optional)
-  - If omitted and exactly one BACnet Hub entry exists, that entry is reloaded.
-
-## Limitations
-
-- BACnet/IP focus (`IPv4/prefix:port` bind format).
-- Single config entry (`single_config_entry: true`).
-- Labels-first auto model; legacy/manual mappings are removed during sync.
-- Published `multiStateValue` currently has no dedicated HA mirror platform entity.
-
-## Troubleshooting
-
-- No entities imported:
-  - Verify selected labels in options.
-  - Verify labels are attached to entity, its device, or the linked area.
-- Address bind errors (`address already in use`):
-  - Ensure only one BACnet process binds the same IP/port.
-- Direct BACnet writes rejected:
-  - Check write target is supported and corresponding HA service exists.
-- Client points not updating:
-  - Confirm remote device supports COV/read for the point.
-  - Trigger reload via `bacnet_hub.reload`.
-
-## License
-
-MIT. See `LICENSE`.
-
-Copyright (c) 2025-2026 Alessio Magliarella
+Modifier la priorité d'écriture BACnet agit directement sur des équipements CVC/automates.
+Une priorité plus haute (valeur plus petite) **prend le pas** sur la régulation interne de
+l'automate. À utiliser en connaissance de cause, de préférence après test sur un banc.

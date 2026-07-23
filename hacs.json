@@ -1,11 +1,9 @@
 {
-  "name": "BACnet Hub",
+  "name": "BACnet Hub Priority",
   "country": "CH",
   "domains": [
     "bacnet_hub"
   ],
   "render_readme": true,
-  "content_in_root": false,
-  "zip_release": true,
-  "filename": "bacnet_hub.zip"
+  "content_in_root": false
 }
