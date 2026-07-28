@@ -102,13 +102,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
     def _start_bg_task(coro: Any) -> None:
         # Fork : _schedule_rescan peut être appelé depuis un thread autre que
-        # l'event loop (timer/thread BACpypes3). hass.async_create_task n'est PAS
-        # thread-safe et lève une RuntimeError bloquante depuis HA 2025.12.
-        # hass.create_task est la variante thread-safe.
-        task = hass.create_task(coro)
+        # l'event loop (timer/thread BACpypes3).
+        #  - hass.async_create_task n'est PAS thread-safe (RuntimeError bloquante
+        #    depuis HA 2025.12) mais retourne un Task.
+        #  - hass.create_task est thread-safe mais retourne None (d'où le crash
+        #    sur task.add_done_callback).
+        # On choisit donc l'API selon le contexte d'appel. Les deux objets
+        # retournés exposent add_done_callback / done / cancel / exception.
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        if running_loop is hass.loop:
+            task = hass.async_create_task(coro)
+        else:
+            task = asyncio.run_coroutine_threadsafe(coro, hass.loop)
+
         bg_tasks.add(task)
 
-        def _done(done_task: asyncio.Task) -> None:
+        def _done(done_task: Any) -> None:
             bg_tasks.discard(done_task)
             try:
                 _ = done_task.exception()
