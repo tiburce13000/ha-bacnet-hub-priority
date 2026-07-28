@@ -1027,6 +1027,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await hass.config_entries.async_forward_entry_setups(entry, ["select"])
     await hass.config_entries.async_forward_entry_setups(entry, ["text"])
     await hass.config_entries.async_forward_entry_setups(entry, ["binary_sensor"])
+    # Fork : plateforme "button" (boutons « Relâcher »). Les plateformes sont
+    # déclarées explicitement ici, PLATFORMS ne sert qu'au déchargement.
+    await hass.config_entries.async_forward_entry_setups(entry, ["button"])
     renamed_entities = _normalize_published_entity_ids(hass, entry, published)
     if renamed_entities:
         _LOGGER.info(
