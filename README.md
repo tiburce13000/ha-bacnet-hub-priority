@@ -63,6 +63,24 @@ Par rapport à l'intégration originale de @magliaral :
 | `custom_components/bacnet_hub/client_point_entities.py` | **modif** | La priorité d'écriture est **lue depuis le sélecteur** au lieu d'être figée à 16 ; portée étendue à `ao/bo/av/bv/mv`. |
 | `manifest.json`, `hacs.json` | **modif** | Identité du fork. |
 
+### Corrections de compatibilité Home Assistant 2025.12+
+
+Deux problèmes du code d'origine devenus **bloquants** avec les versions récentes de
+Home Assistant sont corrigés :
+
+- **Thread-safety** : `_schedule_rescan` appelait `hass.async_create_task` depuis un thread
+  autre que l'event loop, ce qui lève désormais une `RuntimeError` et empêche le chargement
+  de l'intégration (et provoquait une tempête d'erreurs UDP `sendto` sur transport fermé).
+  Remplacé par `hass.create_task` (variante thread-safe).
+- **`via_device` inexistant** : les entités clientes référençaient un device parent
+  (`(DOMAIN, entry_id)`) jamais déclaré dans le registre. Ce device « BACnet Hub » est
+  maintenant créé au début de `async_setup_entry`, avant la création des entités enfants.
+
+| Fichier | Nature | Description |
+| --- | --- | --- |
+| `custom_components/bacnet_hub/sensor.py` | **modif** | `hass.create_task` (thread-safe) dans `_start_bg_task`. |
+| `custom_components/bacnet_hub/__init__.py` | **modif** | Déclaration du device hub parent dans le registre. |
+
 ### Bouton « Relâcher » (libération du Priority Array)
 
 Chaque point commandable disposant d'un Priority Array reçoit un **bouton « Relâcher »**
