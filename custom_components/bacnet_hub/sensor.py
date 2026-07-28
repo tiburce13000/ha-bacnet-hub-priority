@@ -101,7 +101,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         return current is platform_server_ref
 
     def _start_bg_task(coro: Any) -> None:
-        task = hass.async_create_task(coro)
+        # Fork : _schedule_rescan peut être appelé depuis un thread autre que
+        # l'event loop (timer/thread BACpypes3). hass.async_create_task n'est PAS
+        # thread-safe et lève une RuntimeError bloquante depuis HA 2025.12.
+        # hass.create_task est la variante thread-safe.
+        task = hass.create_task(coro)
         bg_tasks.add(task)
 
         def _done(done_task: asyncio.Task) -> None:

@@ -876,6 +876,22 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     from .server import BacnetHubServer
+    from homeassistant.helpers import device_registry as dr
+
+    # Fork : les entités clientes déclarent via_device=(DOMAIN, entry_id).
+    # Ce device "hub" parent doit exister dans le registre AVANT la création des
+    # entités enfants, sinon HA journalise une erreur (bloquante depuis 2025.12).
+    try:
+        device_registry = dr.async_get(hass)
+        device_registry.async_get_or_create(
+            config_entry_id=entry.entry_id,
+            identifiers={(DOMAIN, entry.entry_id)},
+            name="BACnet Hub",
+            manufacturer="BACnet",
+            model="BACnet IP Hub",
+        )
+    except Exception:
+        _LOGGER.debug("Impossible de déclarer le device hub parent", exc_info=True)
 
     data = _ensure_domain(hass)
     servers: dict[str, BacnetHubServer] = data[KEY_SERVERS]
