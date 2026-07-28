@@ -11,18 +11,26 @@ Indispensable pour :
 - la sécurité : si une sonde de référence devient indisponible, on relâche
   plutôt que de laisser une commande figée.
 
-Créé uniquement pour les points commandables disposant d'un Priority Array
-(ao, bo, av, bv, mv). Désactivé par défaut.
+Note d'implémentation : ce bouton réutilise l'adressage et le suivi de
+disponibilité de la classe de base, mais PAS sa machinerie d'état :
+- il n'enregistre pas de souscription COV (inutile pour une action, et cela
+  ferait doublon avec l'entité principale du même point) ;
+- il n'a pas d'état à appliquer (`_apply_point_state` est un no-op) ;
+- il conserve son propre nom (la base réécrit sinon le nom depuis l'objet BACnet).
 """
 
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from homeassistant.components.button import ButtonEntity
+from homeassistant.core import callback
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import EntityCategory
 
 from .client_point_entities import BacnetClientPointEntityBase
+from .client_runtime import _client_points_signal
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -53,12 +61,40 @@ class BacnetClientPointReleaseButton(BacnetClientPointEntityBase, ButtonEntity):
             point_key=point_key,
             entity_domain="button",
         )
-        # Identifiant et nom dérivés du point, suffixés pour ne pas entrer en
-        # collision avec l'entité principale (number/switch/select) du même point.
-        base_uid = self._attr_unique_id
-        self._attr_unique_id = f"{base_uid}-release"
-        base_name = self._attr_name or "Point"
-        self._attr_name = f"{base_name} — Relâcher"
+        # Identifiant suffixé pour ne pas entrer en collision avec l'entité
+        # principale (number/switch/select) du même point.
+        self._attr_unique_id = f"{self._attr_unique_id}-release"
+        base_name = getattr(self, "_attr_name", None) or "Point"
+        self._release_name = f"{base_name} — Relâcher"
+        self._attr_name = self._release_name
+
+    async def async_added_to_hass(self) -> None:
+        """Suivi de disponibilité uniquement, sans souscription COV.
+
+        On n'appelle PAS `super().async_added_to_hass()` : la base enregistre une
+        souscription COV et réécrit le nom de l'entité, ce qui n'a pas de sens
+        pour un bouton d'action.
+        """
+        self._unsub_points_dispatcher = async_dispatcher_connect(
+            self.hass,
+            _client_points_signal(self._entry_id, self._client_id),
+            self._handle_points_update,
+        )
+        self._handle_points_update()
+
+    @callback
+    def _handle_points_update(self) -> None:
+        """Met à jour la seule disponibilité, en conservant le nom du bouton."""
+        point = self._get_point()
+        if not point:
+            return
+        self._attr_available = not bool(point.get(self._POINT_UNAVAILABLE_KEY, False))
+        self._attr_name = self._release_name
+        self.async_write_ha_state()
+
+    def _apply_point_state(self, point: dict[str, Any]) -> None:
+        """Un bouton n'a pas d'état à appliquer."""
+        return None
 
     async def async_press(self) -> None:
         """Relâche la commande : écrit Null à la priorité configurée."""
