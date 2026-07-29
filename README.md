@@ -119,6 +119,48 @@ Ce fork corrige cela :
 | `custom_components/bacnet_hub/client_runtime.py` | **modif** | Bail COV 600 s + constante `CLIENT_COV_RENEW_FRACTION`. |
 | `custom_components/bacnet_hub/client_point_entities.py` | **modif** | Renouvellement COV anticipé (make-before-break). |
 
+### Relecture forcée du Present Value après écriture (v1.0.4)
+
+Une écriture BACnet — valeur ou **Null** (relâchement) — ne déclenche pas
+systématiquement de notification COV côté automate. Sans relecture, l'entité Home
+Assistant restait figée sur la dernière valeur **commandée** jusqu'au cycle COV
+suivant : retard mesuré de **plus de 3 minutes** sur un Distech ECB-203 après un
+relâchement, l'entité affichant une valeur fausse pendant tout ce temps.
+
+Ce fork ajoute une **relecture du `presentValue`** après chaque écriture et après
+chaque relâchement, en **deux passes** (0,5 s puis 3 s, la seconde ne republiant rien
+si la valeur n'a pas bougé). La relecture est asynchrone : le service HA rend la main
+immédiatement, et un échec de relecture ne fait jamais échouer l'écriture.
+
+**Conséquence :** l'entité affiche désormais la valeur **réelle** de l'automate, et
+non la valeur commandée. Si un niveau de priorité plus fort l'emporte, l'entité le
+montre au lieu de mentir.
+
+| Fichier | Nature | Description |
+| --- | --- | --- |
+| `custom_components/bacnet_hub/client_point_entities.py` | **modif** | `_schedule_present_value_refresh()` / `_async_refresh_present_value()`, appelées depuis `_async_write_present_value()` et `_async_release_present_value()`. |
+
+### Noms et unités effacés par un scan partiel (v1.0.4)
+
+À chaque import, l'intégration lit 13 propriétés par objet. Sur une liaison MS/TP
+derrière un routeur BACnet, certaines lectures dépassaient le délai et étaient stockées
+à `None` — puis le cache du point était **remplacé en bloc**, effaçant un nom ou une
+unité pourtant déjà correctement lus. Symptôme : des entités affichées `analog-output 7`
+au lieu de `Ventilateur`, et des pourcentages qui perdent leur unité d'un scan à l'autre.
+
+Corrections :
+
+- **Fusion des valeurs non nulles** à l'import (`_merge_non_none`, comme le fait déjà le
+  payload device) : une lecture ratée ne peut plus effacer une valeur connue, et les scans
+  successifs complètent progressivement les trous.
+- **Délai de lecture porté de 2,5 s à 6 s** (`CLIENT_READ_TIMEOUT_SECONDS`), aligné sur
+  `CLIENT_POINT_REFRESH_TIMEOUT_SECONDS`, pour réduire les trous à la source.
+
+| Fichier | Nature | Description |
+| --- | --- | --- |
+| `custom_components/bacnet_hub/sensor.py` | **modif** | Fusion `_merge_non_none` du point relu avec le point en cache. |
+| `custom_components/bacnet_hub/client_runtime.py` | **modif** | `CLIENT_READ_TIMEOUT_SECONDS` 2,5 s → 6 s. |
+
 Aucune ligne de code de @CervezaStallone n'a été copiée : les deux fichiers ajoutés sont
 écrits spécifiquement pour la structure de l'intégration de @magliaral. Seul le **concept**
 (un sélecteur de priorité device-level) a servi d'inspiration.
