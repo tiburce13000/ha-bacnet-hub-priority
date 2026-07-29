@@ -26,7 +26,11 @@ HUB_DIAGNOSTIC_FIELDS: list[tuple[str, str]] = [
 ]
 HUB_DIAGNOSTIC_SCAN_INTERVAL = timedelta(seconds=60)
 CLIENT_DISCOVERY_TIMEOUT_SECONDS = 3.0
-CLIENT_READ_TIMEOUT_SECONDS = 2.5
+# Fork v1.0.4 : 2.5 s -> 6.0 s. Sur une liaison MS/TP derrière un routeur BACnet
+# (BASrouter), les lectures de propriétés individuelles dépassaient régulièrement
+# 2,5 s : la propriété était alors stockée à None, et l'objet perdait son nom ou
+# son unité. Valeur alignée sur CLIENT_POINT_REFRESH_TIMEOUT_SECONDS.
+CLIENT_READ_TIMEOUT_SECONDS = 6.0
 CLIENT_OBJECTLIST_SCAN_LIMIT = 16
 CLIENT_OBJECTLIST_READ_TIMEOUT_SECONDS = 0.6
 CLIENT_POINT_REFRESH_TIMEOUT_SECONDS = 6.0

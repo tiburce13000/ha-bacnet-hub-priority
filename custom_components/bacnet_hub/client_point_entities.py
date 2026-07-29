@@ -40,9 +40,25 @@ from .client_runtime import (
     _sensor_device_class_from_unit,
     _to_int,
 )
-from .client_runtime import _open_cov_subscription_context, _write_client_point_present_value
+from .client_runtime import (
+    _open_cov_subscription_context,
+    _read_remote_property,
+    _write_client_point_present_value,
+)
 
 _LOGGER = logging.getLogger(__name__)
+
+# Fork v1.0.4 — relecture forcée du Present Value après écriture.
+#
+# Une écriture (valeur ou Null) ne déclenche pas systématiquement de notification
+# COV côté automate. Sans relecture, l'entité HA reste figée sur la dernière valeur
+# COMMANDÉE jusqu'au cycle COV suivant (retard mesuré : plus de 3 minutes sur un
+# Distech ECB-203 après un relâchement). L'entité affiche alors une valeur fausse.
+#
+# Deux passes : la première juste après l'écriture, la seconde en filet de sécurité
+# pour les automates qui appliquent la valeur de façon différée. La seconde passe
+# ne republie rien si la valeur n'a pas changé.
+REFRESH_AFTER_WRITE_DELAYS: tuple[float, ...] = (0.5, 3.0)
 
 
 def _point_is_on(point: dict[str, Any]) -> bool | None:
@@ -95,6 +111,8 @@ class BacnetClientPointEntityBase:
         self._cov_retry_delay_seconds: float = 10.0
         self._cov_retry_not_before_ts: float = 0.0
         self._cov_rescan_not_before_ts: float = 0.0
+        # Fork v1.0.4 : tâches de relecture du Present Value en cours (annulées au retrait).
+        self._refresh_tasks: set[asyncio.Task] = set()
 
         cache = _client_points_get(hass, entry_id, client_id).get(self._point_key, {})
         type_slug = str(cache.get("type_slug") or "point")
@@ -151,6 +169,11 @@ class BacnetClientPointEntityBase:
         if self._unsub_cov_dispatcher is not None:
             self._unsub_cov_dispatcher()
             self._unsub_cov_dispatcher = None
+        # Fork v1.0.4 : stopper les relectures planifiées avant de retirer l'entité.
+        for task in list(self._refresh_tasks):
+            if not task.done():
+                task.cancel()
+        self._refresh_tasks.clear()
         async with self._cov_lock:
             await self._async_stop_cov_runtime()
 
@@ -470,6 +493,102 @@ class BacnetClientPointEntityBase:
                 {"client_id": self._client_id},
             )
 
+    def _schedule_present_value_refresh(self) -> None:
+        """Fork v1.0.4 : planifie la relecture du Present Value réel après écriture.
+
+        Non bloquant : le service HA (`set_value`, `select_option`, `press`…) rend la
+        main immédiatement, la relecture se fait en tâche de fond.
+
+        Appelé depuis l'event loop (services d'entité) -> `hass.async_create_task`.
+        NE PAS utiliser `hass.create_task`, qui retourne `None`.
+        """
+        try:
+            task = self.hass.async_create_task(self._async_refresh_present_value())
+        except BaseException:
+            _LOGGER.debug(
+                "Planification de la relecture impossible pour %s",
+                self._point_key,
+                exc_info=True,
+            )
+            return
+        if task is None:
+            return
+        self._refresh_tasks.add(task)
+        task.add_done_callback(self._refresh_tasks.discard)
+
+    async def _async_refresh_present_value(self) -> None:
+        """Fork v1.0.4 : relit le Present Value sur l'automate et publie l'état réel.
+
+        Ne lève jamais : une relecture ratée ne doit pas faire échouer l'écriture qui
+        vient d'aboutir. En cas d'échec, l'état reste celui d'avant, corrigé plus tard
+        par le COV.
+        """
+        point = self._get_point()
+        if not point:
+            return
+
+        address = _safe_text(point.get("client_address"))
+        object_type = _safe_text(point.get("object_type"))
+        object_instance = _to_int(point.get("object_instance"))
+        if not address or not object_type or object_instance is None:
+            return
+
+        # Même construction d'identifiant que le chemin d'écriture.
+        objid = f"{object_type},{int(object_instance)}"
+
+        for delay in REFRESH_AFTER_WRITE_DELAYS:
+            if float(delay) > 0:
+                await asyncio.sleep(float(delay))
+
+            server = self.hass.data.get(DOMAIN, {}).get("servers", {}).get(self._entry_id)
+            app = getattr(server, "app", None) if server is not None else None
+            if app is None:
+                return
+
+            try:
+                value = await _read_remote_property(app, address, objid, "presentValue")
+            except asyncio.CancelledError:
+                raise
+            except BaseException:
+                _LOGGER.debug(
+                    "Relecture du Present Value échouée pour %s (%s)",
+                    objid,
+                    address,
+                    exc_info=True,
+                )
+                continue
+
+            current = self._get_point()
+            if not current:
+                return
+
+            try:
+                unchanged = current.get("present_value") == value
+            except BaseException:
+                unchanged = False
+            if unchanged:
+                continue
+
+            current["present_value"] = value
+            _client_points_set(
+                self.hass,
+                self._entry_id,
+                self._client_id,
+                {self._point_key: current},
+            )
+            async_dispatcher_send(self.hass, _client_points_signal(self._entry_id, self._client_id))
+            async_dispatcher_send(
+                self.hass,
+                _entry_points_signal(self._entry_id),
+                {"client_id": self._client_id},
+            )
+            _LOGGER.debug(
+                "Present Value relu sur %s (%s) : %s",
+                objid,
+                address,
+                value,
+            )
+
     async def _async_write_present_value(self, value: Any) -> None:
         point = self._get_point()
         if not point:
@@ -522,6 +641,10 @@ class BacnetClientPointEntityBase:
             _entry_points_signal(self._entry_id),
             {"client_id": self._client_id},
         )
+
+        # Fork v1.0.4 : la valeur ci-dessus est OPTIMISTE (affichage immédiat).
+        # On relit le Present Value réel pour publier la vérité de l'automate.
+        self._schedule_present_value_refresh()
 
     async def _async_release_present_value(self) -> None:
         """Fork : relâche la commande en écrivant Null à la priorité configurée.
@@ -578,6 +701,10 @@ class BacnetClientPointEntityBase:
             object_instance,
             write_priority,
         )
+
+        # Fork v1.0.4 : après un relâchement, l'automate reprend la main avec SA valeur.
+        # Sans relecture, l'entité resterait figée sur la dernière valeur commandée par HA.
+        self._schedule_present_value_refresh()
 
     @callback
     def _handle_points_update(self) -> None:

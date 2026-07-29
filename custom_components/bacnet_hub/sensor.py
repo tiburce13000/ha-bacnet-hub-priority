@@ -42,6 +42,7 @@ from .client_runtime import (
     _client_rescan_signal,
     _entry_points_signal,
     _hub_diag_signal,
+    _merge_non_none,
     _point_platform,
     _safe_text,
     _supported_point_type,
@@ -303,6 +304,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
                 if result is None:
                     continue
                 point_key, point = result
+                # Fork v1.0.4 : ne JAMAIS écraser une valeur déjà connue par un trou.
+                # Une lecture de propriété qui dépasse le délai est stockée à None ;
+                # sans cette fusion, un scan partiel effaçait le nom ou l'unité d'un
+                # objet déjà correctement lu (constaté sur AO:7, qui a perdu son « % »).
+                # Même principe que le payload device, qui utilise déjà _merge_non_none.
+                previous_point = dict(
+                    _client_points_get(hass, entry.entry_id, client_id).get(point_key, {}) or {}
+                )
+                if previous_point:
+                    point = _merge_non_none(previous_point, point)
                 payload[point_key] = point
                 type_slug = str(point.get("type_slug") or "").strip() or "unknown"
                 per_type_counts[type_slug] = int(per_type_counts.get(type_slug, 0)) + 1
