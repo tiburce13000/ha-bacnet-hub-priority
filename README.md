@@ -161,6 +161,57 @@ Corrections :
 | `custom_components/bacnet_hub/sensor.py` | **modif** | Fusion `_merge_non_none` du point relu avec le point en cache. |
 | `custom_components/bacnet_hub/client_runtime.py` | **modif** | `CLIENT_READ_TIMEOUT_SECONDS` 2,5 s → 6 s. |
 
+### Écriture en priorité désarmée par une lecture ratée (v1.0.5)
+
+Les points commandables étaient détectés en sondant la propriété `priorityArray`. Une
+lecture qui dépassait le délai était stockée à `None`, donc le point était déclaré sans
+Priority Array : l'entité `number` redevenait un `sensor`, le bouton Relâcher disparaissait,
+et surtout **les écritures partaient sans priorité** — acceptées par l'automate, écrasées
+aussitôt, sans aucune erreur.
+
+La priorité d'écriture, le relâchement et la plateforme de l'entité sont désormais décidés
+à partir du **type d'objet** (`ao`, `bo`, `av`, `bv`, `mv`, `csv`), qui provient de
+l'identifiant de l'objet et ne peut pas se dégrader. Aucune lecture réseau n'intervient
+plus dans ce chemin. `has_priority_array` n'est conservé qu'à titre indicatif.
+
+`_protect_point_metadata()` complète `_merge_non_none()` en protégeant aussi les valeurs de
+**repli** — nom généré `"<type> <instance>"`, flag `False` — que la fusion laissait passer
+puisqu'elles ne sont pas nulles.
+
+| Fichier | Nature | Description |
+| --- | --- | --- |
+| `custom_components/bacnet_hub/client_runtime.py` | **modif** | `_point_is_writable()` par type, ajout de `_protect_point_metadata()`. |
+| `custom_components/bacnet_hub/client_point_entities.py` | **modif** | Priorité et relâchement décidés par type. |
+| `custom_components/bacnet_hub/button.py` | **modif** | Bouton Relâcher créé selon le type. |
+| `custom_components/bacnet_hub/sensor.py` | **modif** | Protection des métadonnées à l'import. |
+| `custom_components/bacnet_hub/__init__.py` | **modif** | Relâchement garanti à l'arrêt de HA et au déchargement. |
+
+### Relâchement garanti à l'arrêt de Home Assistant (v1.0.5)
+
+Une valeur écrite dans un Priority Array y reste jusqu'à ce que quelqu'un écrive `Null`.
+Le standard BACnet ne prévoit aucune expiration. Sur un Distech ECB-203, il a été vérifié
+que le Priority Array survit à une coupure d'alimentation **et** à 30 minutes de perte de
+communication, et que le programme embarqué ne contient aucun chien de garde : l'automate
+ne rend jamais la main de lui-même.
+
+Sans relâchement, toute valeur écrite par Home Assistant reste donc inscrite indéfiniment
+dès lors que Home Assistant s'arrête, redémarre ou disparaît.
+
+Chaque point réellement commandé est désormais mémorisé, puis relâché :
+
+- à l'arrêt de Home Assistant (`EVENT_HOMEASSISTANT_STOP`) ;
+- au déchargement de l'entrée de configuration, avant que la pile BACnet ne s'arrête ;
+- l'opération est idempotente et ne relâche que les points effectivement occupés.
+
+Les écritures sont séquentielles — des écritures simultanées se gênent sur une liaison
+MS/TP — et encadrées par un budget global : l'arrêt de Home Assistant n'est jamais retardé.
+Un point dont le relâchement échoue reste mémorisé pour une tentative ultérieure, et
+l'échec est journalisé.
+
+⚠️ Le relâchement rend la main au niveau de priorité inférieur. Si aucun n'est occupé, la
+sortie prend la valeur de `Relinquish Default`. Vérifiez cette valeur avant de vous fier au
+relâchement comme retour à un état sûr.
+
 Aucune ligne de code de @CervezaStallone n'a été copiée : les deux fichiers ajoutés sont
 écrits spécifiquement pour la structure de l'intégration de @magliaral. Seul le **concept**
 (un sélecteur de priorité device-level) a servi d'inspiration.
