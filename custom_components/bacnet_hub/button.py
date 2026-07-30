@@ -38,9 +38,10 @@ async def async_setup_entry(
             for point_key, point in sorted(point_cache.items()):
                 data = dict(point or {})
                 type_slug = str(data.get("type_slug") or "").strip().lower()
-                has_priority_array = bool(data.get("has_priority_array"))
-                # Uniquement les points réellement commandables avec Priority Array.
-                if type_slug not in COMMANDABLE_TYPE_SLUGS or not has_priority_array:
+                # Fork v1.0.5 — NIVEAU 1 : création fondée sur le seul type d'objet.
+                # Auparavant, une lecture ratée de priorityArray faisait disparaître
+                # le bouton Relâcher de l'appareil.
+                if type_slug not in COMMANDABLE_TYPE_SLUGS:
                     continue
 
                 key = (str(client_id), str(point_key))

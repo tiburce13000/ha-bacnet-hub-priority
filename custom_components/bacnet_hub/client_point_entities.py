@@ -41,8 +41,10 @@ from .client_runtime import (
     _to_int,
 )
 from .client_runtime import (
+    _forget_client_written_point,
     _open_cov_subscription_context,
     _read_remote_property,
+    _record_client_written_point,
     _write_client_point_present_value,
 )
 
@@ -606,11 +608,11 @@ class BacnetClientPointEntityBase:
             raise HomeAssistantError("Point addressing incomplete")
 
         type_slug = str(point.get("type_slug") or "").strip().lower()
-        has_priority_array = bool(point.get("has_priority_array"))
-        # Fork : priorité d'écriture device-level (sélecteur "Priorité d'écriture"),
-        # défaut 16. Appliquée à tous les objets commandables disposant d'un
-        # Priority Array (ao, bo, av, bv, mv), pas seulement ao/bo.
-        if type_slug in {"ao", "bo", "av", "bv", "mv"} and has_priority_array:
+        # Fork v1.0.5 — NIVEAU 1 : la priorité d'écriture ne dépend PLUS de
+        # has_priority_array, donc plus d'une lecture réseau. Une lecture ratée
+        # faisait partir l'écriture sans priorité : acceptée par l'automate,
+        # écrasée aussitôt, et sans erreur affichée.
+        if type_slug in {"ao", "bo", "av", "bv", "mv"}:
             from .write_priority import get_write_priority
 
             write_priority = get_write_priority(
@@ -627,6 +629,21 @@ class BacnetClientPointEntityBase:
             value,
             priority=write_priority,
         )
+
+        # Fork v1.0.5 : l'ecriture a abouti et occupe desormais un niveau de
+        # priorite sur l'automate. On le memorise pour pouvoir le relacher a
+        # l'arret de Home Assistant : l'ECB-203 ne rend jamais la main seul.
+        if write_priority is not None:
+            _record_client_written_point(
+                self.hass,
+                self._entry_id,
+                client_id=self._client_id,
+                point_key=self._point_key,
+                address=address,
+                object_type=object_type,
+                object_instance=int(object_instance),
+                priority=write_priority,
+            )
 
         point["present_value"] = value
         _client_points_set(
@@ -669,8 +686,8 @@ class BacnetClientPointEntityBase:
             raise HomeAssistantError("Point addressing incomplete")
 
         type_slug = str(point.get("type_slug") or "").strip().lower()
-        has_priority_array = bool(point.get("has_priority_array"))
-        if type_slug not in {"ao", "bo", "av", "bv", "mv"} or not has_priority_array:
+        # Fork v1.0.5 — NIVEAU 1 : refus fondé sur le seul type d'objet.
+        if type_slug not in {"ao", "bo", "av", "bv", "mv"}:
             raise HomeAssistantError(
                 "Ce point ne gère pas de Priority Array : relâchement impossible"
             )
@@ -693,6 +710,14 @@ class BacnetClientPointEntityBase:
             int(object_instance),
             null_value,
             priority=write_priority,
+        )
+
+        # Fork v1.0.5 : le point n'occupe plus de niveau de priorite.
+        _forget_client_written_point(
+            self.hass,
+            self._entry_id,
+            client_id=self._client_id,
+            point_key=self._point_key,
         )
 
         _LOGGER.debug(

@@ -44,6 +44,7 @@ from .client_runtime import (
     _hub_diag_signal,
     _merge_non_none,
     _point_platform,
+    _protect_point_metadata,
     _safe_text,
     _supported_point_type,
     _to_int,
@@ -314,6 +315,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
                 )
                 if previous_point:
                     point = _merge_non_none(previous_point, point)
+                    # Fork v1.0.5 : protège aussi contre les valeurs de REPLI
+                    # (nom généré, has_priority_array=False), que _merge_non_none
+                    # laisse passer car elles ne sont pas None.
+                    point = _protect_point_metadata(previous_point, point)
                 payload[point_key] = point
                 type_slug = str(point.get("type_slug") or "").strip() or "unknown"
                 per_type_counts[type_slug] = int(per_type_counts.get(type_slug, 0)) + 1

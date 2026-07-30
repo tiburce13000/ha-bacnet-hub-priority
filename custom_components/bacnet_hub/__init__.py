@@ -7,7 +7,7 @@ import re
 from typing import Any, Dict, List
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
@@ -1040,6 +1040,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     sync_unsubs[entry.entry_id] = _start_sync_triggers(hass, entry.entry_id)
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
+
+    # Fork v1.0.5 : relachement garanti a l'arret de Home Assistant.
+    # L'ECB-203 ne rend jamais la main de lui-meme (essais du 29/07/2026 :
+    # Priority Array conserve apres coupure secteur et apres 30 min de perte de
+    # communication, aucun chien de garde embarque). Sans ce relachement, toute
+    # valeur ecrite par HA reste inscrite indefiniment sur l'automate.
+    async def _async_release_on_stop(_event: Any) -> None:
+        from .client_runtime import _release_all_client_written_points
+
+        server_now = hass.data.get(DOMAIN, {}).get(KEY_SERVERS, {}).get(entry.entry_id)
+        app_now = getattr(server_now, "app", None) if server_now is not None else None
+        try:
+            released = await _release_all_client_written_points(
+                hass, entry.entry_id, app=app_now, reason="arret de Home Assistant"
+            )
+        except Exception:
+            _LOGGER.exception("Relachement a l'arret en echec (entry %s)", entry.entry_id)
+            return
+        if released:
+            _LOGGER.info(
+                "%d point(s) relache(s) a l'arret de Home Assistant (entry %s)",
+                released,
+                entry.entry_id,
+            )
+
+    entry.async_on_unload(
+        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _async_release_on_stop)
+    )
     # Avoid an immediate self-reload loop during HA startup.
     # Dynamic mapping updates are still handled by event-driven sync triggers.
     _LOGGER.info("%s started (Entry %s)", DOMAIN, entry.entry_id)
@@ -1051,6 +1079,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     data = _ensure_domain(hass)
     servers: dict[str, Any] = data[KEY_SERVERS]
+
+    # Fork v1.0.5 : relacher AVANT de decharger les plateformes et d'arreter le
+    # serveur, sinon la pile BACnet n'est plus disponible pour ecrire le Null.
+    # Idempotent : le registre est vide au fur et a mesure des relachements, un
+    # second appel (arret de HA puis dechargement) ne fait rien.
+    try:
+        from .client_runtime import _release_all_client_written_points
+
+        server_for_release = servers.get(entry.entry_id)
+        app_for_release = (
+            getattr(server_for_release, "app", None) if server_for_release is not None else None
+        )
+        await _release_all_client_written_points(
+            hass, entry.entry_id, app=app_for_release, reason="dechargement de l'integration"
+        )
+    except Exception:
+        _LOGGER.exception("Relachement au dechargement en echec (entry %s)", entry.entry_id)
+
     locks: dict[str, asyncio.Lock] = data[KEY_LOCKS]
     sync_unsubs: dict[str, Any] = data[KEY_SYNC_UNSUB]
     event_sync_tasks: dict[str, asyncio.Task] = data[KEY_EVENT_SYNC_TASKS]
@@ -1108,6 +1154,8 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     data.setdefault("client_diag_cache", {}).pop(entry.entry_id, None)
     data.setdefault("client_point_cache", {}).pop(entry.entry_id, None)
     data[KEY_CLIENT_IAM_CACHE].pop(entry.entry_id, None)
+    # Fork v1.0.5 : l'entree est supprimee, plus rien ne relachera ces points.
+    data.setdefault("client_written_points", {}).pop(entry.entry_id, None)
 
     removed_entities, removed_devices = _hard_cleanup_entry_registries(hass, entry.entry_id)
     if removed_entities or removed_devices:

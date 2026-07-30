@@ -540,12 +540,66 @@ def _point_has_priority_array(point: dict[str, Any]) -> bool:
 
 
 def _point_is_writable(point: dict[str, Any]) -> bool:
+    """Fork v1.0.5 : décision d'écriture fondée sur le TYPE d'objet uniquement.
+
+    NIVEAU 1 — ne doit jamais casser. Auparavant, `ao` et `bo` dépendaient de
+    `_point_has_priority_array()`, donc du succès d'une lecture réseau de la
+    propriété `priorityArray`. Une lecture qui dépassait le délai suffisait à
+    déclarer le point non inscriptible : l'entité `number` redevenait un simple
+    `sensor`, le bouton Relâcher disparaissait, et les écritures partaient sans
+    priorité — silencieusement écrasées par l'automate.
+
+    Le type d'objet provient de l'identifiant de l'objet lui-même : il ne peut
+    pas se dégrader. Si un `ao`/`bo` n'a réellement pas de Priority Array,
+    l'automate renverra une erreur d'écriture — visible, donc préférable au
+    désarmement silencieux.
+    """
     type_slug = str(point.get("type_slug") or "").strip().lower()
-    if type_slug in {"av", "bv", "mv", "csv"}:
-        return True
-    if type_slug in {"ao", "bo"}:
-        return _point_has_priority_array(point)
-    return False
+    return type_slug in {"ao", "bo", "av", "bv", "mv", "csv"}
+
+
+def _protect_point_metadata(
+    previous: dict[str, Any] | None,
+    current: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Fork v1.0.5 : empêche un rescan partiel de dégrader un point déjà connu.
+
+    NIVEAU 2 — ne doit pas se dégrader. `_merge_non_none()` ne protège que les
+    valeurs remplacées par `None`. Or une lecture ratée produit ici des valeurs
+    NON nulles qui écrasent quand même le bon contenu :
+
+    - `object_name` retombe sur le repli généré `"<type> <instance>"` ;
+    - `has_priority_array` retombe sur `False`.
+
+    Cette fonction ne fait que CONSERVER l'ancienne valeur : elle ne peut ni
+    écrire sur le réseau, ni inventer une valeur, ni bloquer quoi que ce soit.
+    """
+    merged = dict(current or {})
+    prev = dict(previous or {})
+    if not prev:
+        return merged
+
+    # 1. Nom : ne jamais remplacer un nom réel par le repli généré.
+    object_type = str(merged.get("object_type") or "").strip()
+    object_instance = _to_int(merged.get("object_instance"))
+    if object_type and object_instance is not None:
+        fallback_name = f"{object_type} {int(object_instance)}"
+        previous_name = _safe_text(prev.get("object_name"))
+        current_name = _safe_text(merged.get("object_name"))
+        if (
+            previous_name
+            and previous_name != fallback_name
+            and current_name == fallback_name
+        ):
+            merged["object_name"] = prev.get("object_name")
+
+    # 2. has_priority_array : jamais de rétrogradation True -> False.
+    if _point_has_priority_array(prev) and not _point_has_priority_array(merged):
+        merged["has_priority_array"] = prev.get("has_priority_array")
+
+    # 3. Recalcul de l'inscriptibilité après protection (dépend du seul type).
+    merged["writable_from_ha"] = _point_is_writable(merged)
+    return merged
 
 
 def _point_platform(point: dict[str, Any]) -> str:
@@ -712,6 +766,178 @@ async def _write_client_point_present_value(
     if last_err is not None:
         raise last_err
     raise RuntimeError("Unable to write presentValue")
+
+
+# ---------------------------------------------------------------------------
+# Fork v1.0.5 — suivi des points commandés par HA et relâchement garanti
+# ---------------------------------------------------------------------------
+# Essais menés le 29/07/2026 sur un Distech ECB-203 :
+#   - coupure de l'alimentation 24 VAC : le Priority Array est CONSERVÉ ;
+#   - 30 min de perte de communication : le Priority Array est CONSERVÉ ;
+#   - aucun chien de garde dans le programme embarqué.
+# L'automate ne rend donc JAMAIS la main de lui-même : une valeur écrite par
+# Home Assistant reste inscrite indéfiniment si Home Assistant disparaît.
+#
+# On mémorise ici chaque point réellement commandé par HA, afin de ne relâcher
+# QUE ceux-là à l'arrêt de Home Assistant ou au déchargement de l'intégration.
+# Relâcher aveuglément tous les objets serait long et hasardeux.
+#
+# ATTENTION : le relâchement rend la main au niveau de priorité inférieur. Si
+# aucun n'est occupé, la sortie prend la valeur de `Relinquish Default`, qui
+# vaut 0.00 sur l'AO:7 de l'ECB-203. Le retour à une valeur utile repose sur le
+# fait que le programme embarqué occupe la priorité 14.
+KEY_CLIENT_WRITTEN_POINTS = "client_written_points"
+
+# Délai par écriture de relâchement. Volontairement plus court que
+# CLIENT_READ_TIMEOUT_SECONDS : à l'arrêt de HA, mieux vaut échouer vite sur un
+# point injoignable que de retarder l'extinction.
+CLIENT_RELEASE_WRITE_TIMEOUT_SECONDS = 3.0
+
+# Budget global. Ne doit jamais bloquer l'arrêt de Home Assistant.
+CLIENT_RELEASE_TOTAL_BUDGET_SECONDS = 15.0
+
+
+def _client_written_points(hass: HomeAssistant, entry_id: str) -> Dict[str, Dict[str, Any]]:
+    """Registre { "<client_id>::<point_key>": {adresse, objet, priorité} }."""
+    store = hass.data.setdefault(DOMAIN, {}).setdefault(KEY_CLIENT_WRITTEN_POINTS, {})
+    return store.setdefault(str(entry_id), {})
+
+
+def _record_client_written_point(
+    hass: HomeAssistant,
+    entry_id: str,
+    *,
+    client_id: str,
+    point_key: str,
+    address: Any,
+    object_type: Any,
+    object_instance: Any,
+    priority: Any,
+) -> None:
+    """Mémorise un point que HA vient d'occuper à un niveau de priorité.
+
+    Ne lève jamais : un défaut de mémorisation ne doit pas faire échouer une
+    écriture qui a abouti.
+    """
+    if priority is None:
+        return
+    try:
+        _client_written_points(hass, entry_id)[f"{client_id}::{point_key}"] = {
+            "address": str(address),
+            "object_type": str(object_type),
+            "object_instance": int(object_instance),
+            "priority": int(priority),
+        }
+    except BaseException:
+        _LOGGER.debug("Mémorisation du point commandé impossible", exc_info=True)
+
+
+def _forget_client_written_point(
+    hass: HomeAssistant,
+    entry_id: str,
+    *,
+    client_id: str,
+    point_key: str,
+) -> None:
+    """Retire un point du registre après un relâchement réussi. Ne lève jamais."""
+    try:
+        _client_written_points(hass, entry_id).pop(f"{client_id}::{point_key}", None)
+    except BaseException:
+        _LOGGER.debug("Oubli du point commandé impossible", exc_info=True)
+
+
+async def _release_all_client_written_points(
+    hass: HomeAssistant,
+    entry_id: str,
+    *,
+    app: Any,
+    reason: str,
+) -> int:
+    """Écrit Null sur tous les points occupés par HA. NE LÈVE JAMAIS.
+
+    Écritures séquentielles : sur une liaison MS/TP, des écritures simultanées
+    se gênent. Le budget global garantit que l'arrêt de Home Assistant n'est
+    jamais retardé au-delà de CLIENT_RELEASE_TOTAL_BUDGET_SECONDS.
+    """
+    try:
+        pending = dict(_client_written_points(hass, entry_id))
+    except BaseException:
+        _LOGGER.debug("Registre des points commandés illisible", exc_info=True)
+        return 0
+
+    if not pending:
+        return 0
+
+    if app is None:
+        _LOGGER.warning(
+            "Relâchement impossible (%s) : pile BACnet indisponible. "
+            "%d point(s) restent occupés sur l'automate.",
+            reason,
+            len(pending),
+        )
+        return 0
+
+    try:
+        from bacpypes3.primitivedata import Null
+
+        null_value: Any = Null(())
+    except BaseException:
+        _LOGGER.warning(
+            "Relâchement impossible (%s) : Null BACnet indisponible. "
+            "%d point(s) restent occupés sur l'automate.",
+            reason,
+            len(pending),
+            exc_info=True,
+        )
+        return 0
+
+    released = 0
+    deadline = time.monotonic() + CLIENT_RELEASE_TOTAL_BUDGET_SECONDS
+
+    for key, info in pending.items():
+        if time.monotonic() >= deadline:
+            _LOGGER.warning(
+                "Budget de relâchement épuisé (%s) : %d point(s) non relâchés, "
+                "ils restent occupés sur l'automate.",
+                reason,
+                len(pending) - released,
+            )
+            break
+        try:
+            await _write_client_point_present_value(
+                app,
+                info["address"],
+                info["object_type"],
+                int(info["object_instance"]),
+                null_value,
+                priority=int(info["priority"]),
+                timeout=CLIENT_RELEASE_WRITE_TIMEOUT_SECONDS,
+            )
+        except asyncio.CancelledError:
+            raise
+        except BaseException:
+            _LOGGER.warning(
+                "Relâchement en échec pour %s (%s) : le point reste occupé sur l'automate.",
+                key,
+                reason,
+                exc_info=True,
+            )
+            continue
+
+        try:
+            _client_written_points(hass, entry_id).pop(key, None)
+        except BaseException:
+            pass
+        released += 1
+        _LOGGER.info(
+            "Relâchement (Null) écrit sur %s,%s à la priorité %s (%s)",
+            info.get("object_type"),
+            info.get("object_instance"),
+            info.get("priority"),
+            reason,
+        )
+
+    return released
 
 
 async def _open_cov_subscription_context(
