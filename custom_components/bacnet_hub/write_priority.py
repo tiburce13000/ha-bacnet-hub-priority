@@ -6,7 +6,7 @@ défaut, qui s'applique à toutes les écritures commandables (AO/BO/AV/BV/MV av
 Priority Array) de ce device.
 
 Défaut = 16 (comportement d'origine inchangé tant que l'utilisateur ne touche à rien).
-Niveaux proposés = 8..16 (8 = Manual Operator).
+Niveaux proposés = 8..16 sauf 14 (8 = Manual Operator ; 14 = programme interne de l'automate).
 """
 
 from __future__ import annotations
@@ -20,7 +20,10 @@ from .const import DOMAIN
 # Niveau par défaut : 16 (le plus bas / le plus sûr). Comportement d'origine.
 DEFAULT_WRITE_PRIORITY = 16
 # Niveaux proposés dans le sélecteur (8 = Manual Operator ... 16 = le plus bas).
-WRITE_PRIORITY_OPTIONS: list[int] = [8, 9, 10, 11, 12, 13, 14, 15, 16]
+# v1.0.6 : 14 retiree du selecteur. Sur de nombreux automates (dont Distech),
+# 14 est la priorite qu'utilise le programme interne : y ecrire Null via le
+# bouton "Relacher" effacerait la commande native de l'automate.
+WRITE_PRIORITY_OPTIONS: list[int] = [8, 9, 10, 11, 12, 13, 15, 16]
 
 _STORE_KEY = "write_priority"
 

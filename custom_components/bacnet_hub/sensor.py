@@ -58,8 +58,10 @@ from .client_runtime import (
 
 _LOGGER = logging.getLogger(__name__)
 CLIENT_IAM_CACHE_KEY = "client_iam_cache"
-CLIENT_POINT_IMPORT_MAX_PARALLEL = 8
-CLIENT_SCAN_MAX_PARALLEL = 4
+# v1.0.6 : sur une liaison MS/TP, 8 requetes simultanees vers un meme automate
+# allongent les aller-retours au-dela du budget de transaction bacpypes3.
+CLIENT_POINT_IMPORT_MAX_PARALLEL = 2
+CLIENT_SCAN_MAX_PARALLEL = 2
 
 
 class _ClientPointImportTransientError(RuntimeError):
@@ -116,8 +118,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         except RuntimeError:
             running_loop = None
 
+        # v1.0.6 : hass.async_create_background_task n'est PAS attendue par HA
+        # pendant la phase de demarrage (contrairement a async_create_task).
+        # La branche threadsafe est conservee : cette API n'est pas plus
+        # thread-safe que la precedente.
         if running_loop is hass.loop:
-            task = hass.async_create_task(coro)
+            task = hass.async_create_background_task(
+                coro, name=f"{DOMAIN}_{entry.entry_id}_bg"
+            )
         else:
             task = asyncio.run_coroutine_threadsafe(coro, hass.loop)
 
@@ -292,11 +300,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             return point_key, point
 
         if reads_to_run:
-            read_tasks = [
-                hass.async_create_task(_read_one(obj_type, obj_inst, default_key))
+            # v1.0.6 : eventail interne, deja attendu par le gather ci-dessous.
+            # Ne PAS passer par hass.async_create_task : HA attend ces taches a
+            # la fin de la phase de demarrage (blocage du bootstrap).
+            read_coros = [
+                _read_one(obj_type, obj_inst, default_key)
                 for obj_type, obj_inst, default_key in reads_to_run
             ]
-            read_results = await asyncio.gather(*read_tasks, return_exceptions=True)
+            read_results = await asyncio.gather(*read_coros, return_exceptions=True)
             for result in read_results:
                 if isinstance(result, asyncio.CancelledError):
                     raise result
@@ -571,17 +582,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
                         exc_info=True,
                     )
 
-        tasks: list[asyncio.Task] = []
+        # v1.0.6 : eventail interne, deja attendu par le gather ci-dessous.
+        coros: list[Any] = []
         for client_instance, client_address in discovered_map.items():
             if target_instance is not None and int(client_instance) != int(target_instance):
                 continue
-            tasks.append(
-                hass.async_create_task(
-                    _process_one(int(client_instance), str(client_address))
-                )
-            )
-        if tasks:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            coros.append(_process_one(int(client_instance), str(client_address)))
+        if coros:
+            results = await asyncio.gather(*coros, return_exceptions=True)
             for result in results:
                 if isinstance(result, asyncio.CancelledError):
                     raise result

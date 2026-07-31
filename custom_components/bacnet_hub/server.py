@@ -434,6 +434,17 @@ class BacnetHubServer:
             description=str(self.description),
             firmwareRevision=str(self.firmware_revision) if self.firmware_revision else None,
             applicationSoftwareVersion=str(self.application_software_version) if self.application_software_version else None,
+            # v1.0.6 : temporisations de transaction explicites. Sans elles,
+            # bacpypes3 applique ses valeurs de classe (apduTimeout 3000 ms,
+            # numberOfApduRetries 3 -> budget 12 s), superieures aux wait_for du
+            # composant : la SSM retransmettait pendant qu'une reponse etait
+            # encore en vol (RuntimeError COMPLETED -> AWAIT_CONFIRMATION) et la
+            # reponse tardive retombait sur un future deja resolu
+            # (InvalidStateError, app.py:1248).
+            # Budget total = 2000 ms x (1 + 1) = 4,0 s, strictement inferieur au
+            # plus court wait_for du composant (4,5 s).
+            apduTimeout=2000,
+            numberOfApduRetries=1,
         )
         self.device_object = device_object
         self.device_object_identifier = f"OBJECT_DEVICE:{self.instance}"

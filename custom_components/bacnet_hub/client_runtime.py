@@ -32,7 +32,11 @@ CLIENT_DISCOVERY_TIMEOUT_SECONDS = 3.0
 # son unité. Valeur alignée sur CLIENT_POINT_REFRESH_TIMEOUT_SECONDS.
 CLIENT_READ_TIMEOUT_SECONDS = 6.0
 CLIENT_OBJECTLIST_SCAN_LIMIT = 16
-CLIENT_OBJECTLIST_READ_TIMEOUT_SECONDS = 0.6
+# v1.0.6 : doit rester STRICTEMENT superieur au budget de transaction
+# bacpypes3 (apduTimeout 2000 ms x (1 + numberOfApduRetries=1) = 4,0 s).
+# A 0,6 s, wait_for abandonnait la lecture pendant que la SSM bacpypes3
+# poursuivait : la reponse tardive retombait sur un future deja resolu.
+CLIENT_OBJECTLIST_READ_TIMEOUT_SECONDS = 4.5
 CLIENT_POINT_REFRESH_TIMEOUT_SECONDS = 6.0
 CLIENT_POINT_SCAN_LIMIT = 128
 CLIENT_REDISCOVERY_INTERVAL = timedelta(minutes=15)
@@ -788,13 +792,15 @@ async def _write_client_point_present_value(
 # fait que le programme embarqué occupe la priorité 14.
 KEY_CLIENT_WRITTEN_POINTS = "client_written_points"
 
-# Délai par écriture de relâchement. Volontairement plus court que
-# CLIENT_READ_TIMEOUT_SECONDS : à l'arrêt de HA, mieux vaut échouer vite sur un
-# point injoignable que de retarder l'extinction.
-CLIENT_RELEASE_WRITE_TIMEOUT_SECONDS = 3.0
+# Délai par écriture de relâchement. Porté de 3,0 à 4,5 s en v1.0.6 : à 3,0 s
+# le wait_for coupait au milieu d'une transaction bacpypes3 (budget 4,0 s), ce
+# qui laissait le point occupé sur l'automate. Reste plus court que
+# CLIENT_READ_TIMEOUT_SECONDS.
+CLIENT_RELEASE_WRITE_TIMEOUT_SECONDS = 4.5
 
-# Budget global. Ne doit jamais bloquer l'arrêt de Home Assistant.
-CLIENT_RELEASE_TOTAL_BUDGET_SECONDS = 15.0
+# Budget global. Porté de 15 à 25 s en v1.0.6 pour couvrir 5 points x 4,5 s.
+# Ne doit jamais bloquer l'arrêt de Home Assistant.
+CLIENT_RELEASE_TOTAL_BUDGET_SECONDS = 25.0
 
 
 def _client_written_points(hass: HomeAssistant, entry_id: str) -> Dict[str, Dict[str, Any]]:
