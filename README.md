@@ -216,6 +216,87 @@ Aucune ligne de code de @CervezaStallone n'a été copiée : les deux fichiers a
 écrits spécifiquement pour la structure de l'intégration de @magliaral. Seul le **concept**
 (un sélecteur de priorité device-level) a servi d'inspiration.
 
+### Démarrage de Home Assistant bloqué par l'import des points (v1.0.6)
+
+Les lectures de points étaient réparties en éventail avec `hass.async_create_task()`, puis
+attendues sur place par le `asyncio.gather()` de la ligne suivante. Or Home Assistant
+comptabilise les tâches créées par cette API et **les attend à la fin de sa phase de
+démarrage**. Sur une liaison lente, quelques dizaines de lectures suffisaient à produire :
+
+```
+Setup timed out for bootstrap waiting on Task-…
+    _import_client_points.<locals>._read_one() at custom_components/bacnet_hub/sensor.py:278
+Something is blocking Home Assistant from wrapping up the start up phase
+```
+
+Ces éventails sont internes : ils n'ont aucune raison d'être suivis par Home Assistant.
+Ce sont désormais de simples coroutines passées à `asyncio.gather()`. Le helper
+`_start_bg_task()`, lui, utilise `hass.async_create_background_task()`, l'API prévue pour
+les tâches qui ne doivent pas retenir le démarrage. La branche
+`asyncio.run_coroutine_threadsafe` est inchangée : la nouvelle API n'est pas plus
+thread-safe que la précédente.
+
+Le parallélisme d'import passe de 8 à 2 et celui de scan de 4 à 2 : sur une liaison MS/TP,
+des requêtes simultanées vers un même automate allongent les aller-retours au lieu de les
+accélérer.
+
+| Fichier | Nature | Description |
+| --- | --- | --- |
+| `custom_components/bacnet_hub/sensor.py` | **modif** | Éventails internes en coroutines, `async_create_background_task`, parallélisme réduit. |
+
+### Deux horloges pour une même transaction BACnet (v1.0.6)
+
+L'objet Device local était créé sans fixer `apduTimeout` ni `numberOfApduRetries`.
+bacpypes3 appliquait donc ses valeurs de classe — 3000 ms et 3 réessais, soit un budget de
+transaction de **12 secondes** — alors que l'intégration enveloppait chaque appel dans des
+`asyncio.wait_for()` de 0,6 à 6,0 secondes.
+
+Deux horloges indépendantes pilotaient ainsi la même transaction. Une réponse simplement
+lente ne produisait pas un `TimeoutError` propre, mais une trace :
+
+```
+bacpypes3/appservice.py:852  in await_confirmation_timeout
+bacpypes3/appservice.py:404  in set_state
+RuntimeError: invalid state transition from COMPLETED to AWAIT_CONFIRMATION
+
+bacpypes3/app.py:1248  in confirmation
+    future.set_result(apdu)
+asyncio.exceptions.InvalidStateError: invalid state
+```
+
+La machine à états retransmettait pendant qu'une réponse était encore en vol, et la
+réponse tardive retombait sur un future déjà résolu.
+
+L'objet Device fixe désormais `apduTimeout = 2000` et `numberOfApduRetries = 1`, soit un
+budget de 4,0 s. Les gardes trop courts sont remontés en conséquence : lecture de
+l'`objectList` de 0,6 à 4,5 s — 0,6 s était en dessous de tout aller-retour MS/TP
+réaliste —, écriture de relâchement de 3,0 à 4,5 s, budget global de relâchement de 15 à
+25 s.
+
+> **Invariant à respecter pour toute retouche future :** le budget de transaction
+> bacpypes3, `apduTimeout × (1 + numberOfApduRetries)`, doit rester **strictement
+> inférieur** au plus court `asyncio.wait_for()` qui enveloppe un service confirmé.
+> Aujourd'hui 4,0 s contre 4,5 s.
+
+| Fichier | Nature | Description |
+| --- | --- | --- |
+| `custom_components/bacnet_hub/server.py` | **modif** | `apduTimeout` et `numberOfApduRetries` explicites sur l'objet Device. |
+| `custom_components/bacnet_hub/client_runtime.py` | **modif** | Gardes `wait_for` remontés au-dessus du budget de transaction. |
+
+### Priorité 14 retirée du sélecteur (v1.0.6)
+
+Sur de nombreux automates, la priorité 14 est celle qu'utilise le programme interne.
+Un clic de travers dans le menu déroulant suffisait pour que le bouton « Relâcher » y
+écrive `Null` et efface la commande native de l'automate. 14 est retirée de
+`WRITE_PRIORITY_OPTIONS`.
+
+Effet de bord : un device dont la priorité mémorisée était 14 retombe silencieusement sur
+le défaut, 16 — `get_write_priority()` ignore toute valeur hors liste.
+
+| Fichier | Nature | Description |
+| --- | --- | --- |
+| `custom_components/bacnet_hub/write_priority.py` | **modif** | 14 retirée des niveaux proposés. |
+
 ---
 
 ## 📜 Licence
