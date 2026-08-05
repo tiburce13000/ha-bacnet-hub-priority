@@ -340,6 +340,84 @@ Le compromis est inverse de celui des autres tâches.
 | `custom_components/bacnet_hub/client_point_entities.py` | **modif** | 4 tâches passées en arrière-plan : ré-enregistrement COV, boucle de réception COV, renouvellement de bail, relecture du Present Value. |
 | `custom_components/bacnet_hub/sensor_entities.py` | **modif** | 3 tâches passées en arrière-plan : ré-enregistrement COV, boucle de réception COV, renouvellement de bail. |
 
+### Lecture du Priority Array à la demande (v1.1.0)
+
+CAS BACnet Explorer affiche les 16 niveaux du Priority Array d'un objet. Home Assistant
+n'exposait rien de tel — alors que la donnée transitait déjà. Dans
+`_read_client_point_payload`, `priorityArray` figure parmi les propriétés demandées à
+l'automate, puis :
+
+```python
+has_priority_array = values.get("priorityArray") is not None
+```
+
+Les 16 niveaux étaient réduits à un booléen et jetés.
+
+Conserver simplement ce contenu n'aurait pas suffi : cette fonction n'est appelée que
+depuis la boucle d'import des points, pas par un rafraîchissement cyclique. La photo
+n'arriverait qu'à l'import — rarement, et jamais au moment utile.
+
+**Un bouton « Lire le Priority Array » par device** répond au besoin : à la pression, il
+lit les 16 niveaux de chaque point commandable du device et les expose en attributs.
+
+```yaml
+last_read: "2026-08-05T09:41:12+00:00"
+read_duration_seconds: 4.31
+points_count: 5
+errors: []
+points:
+  ao_7:
+    object: analog-output,7
+    name: Fan
+    priorities: [null, null, null, null, null, null, null, 66.0,
+                 null, null, null, null, null, 30.0, null, null]
+    active_levels: [8, 14]
+    highest_active: 8
+```
+
+`priorities` est indexé par niveau BACnet : l'élément 1 est la priorité 1.
+`active_levels` liste les niveaux occupés, `highest_active` celui qui l'emporte.
+
+**Trois garde-fous :**
+
+*Un niveau à zéro reste un niveau à zéro.* Le cas `null` du choice `PriorityValue`
+ressort en `None`, jamais en `0.0` — sans quoi un niveau libre serait indiscernable
+d'une commande à zéro, qui est justement l'information recherchée.
+
+*Un échec renvoie `None` franc*, jamais `[]` ni `[None] * 16`. La photo précédente du
+point est alors conservée et `errors` signale l'échec. C'est le piège de la v1.0.4 :
+`has_priority_array` était un `bool` et `object_name` avait un repli non nul, ce qui les
+rendait invisibles à la protection `_merge_non_none`.
+
+*Aucune lecture réseau ne conditionne une écriture.* Le bouton est un outil de
+diagnostic ; aucun chemin d'écriture ne l'appelle. C'est l'acquis de la v1.0.5, payé au
+prix d'une régression silencieuse en v1.0.4.
+
+**Transport.** La lecture se fait en une requête pour le tableau entier. Si elle échoue,
+un repli lit niveau par niveau via `array_index` — pour les automates dont la réponse
+complète dépasse `Max Apdu Length Accepted` alors que `Segmentation Supported = None`,
+cas qui produit un `Abort from device: 6`. Ce repli coûte 16 aller-retours et ne se
+déclenche qu'en dernier recours. Les points sont lus **séquentiellement**, avec 0,2 s
+entre chacun : sur une liaison MS/TP, des requêtes simultanées vers un même automate
+allongent les aller-retours au lieu de les raccourcir.
+
+**Le bouton est désactivé par défaut**, comme le sélecteur de priorité et le bouton
+« Relâcher ». Catégorie diagnostic.
+
+| Fichier | Nature | Description |
+| --- | --- | --- |
+| `custom_components/bacnet_hub/priority_array_button.py` | **nouveau** | Bouton de lecture, un par device. |
+| `custom_components/bacnet_hub/client_runtime.py` | **modif** | Normalisation des `PriorityValue`, lecture avec repli par index. |
+| `custom_components/bacnet_hub/button.py` | **modif** | Création du bouton par device. |
+
+### Comportement du bouton « Relâcher » — à connaître
+
+Le bouton écrit `Null` **à la priorité couramment sélectionnée**. Si la priorité change
+entre l'écriture et le relâchement, la commande reste figée à l'ancien niveau. Ce n'est
+pas un défaut, c'est la conséquence logique du modèle BACnet — mais cela conditionne
+toute procédure de reprise de main, et le Priority Array permet désormais de repérer ces
+résidus.
+
 ---
 
 ## 📜 Licence
