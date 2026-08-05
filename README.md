@@ -297,6 +297,49 @@ le défaut, 16 — `get_write_priority()` ignore toute valeur hors liste.
 | --- | --- | --- |
 | `custom_components/bacnet_hub/write_priority.py` | **modif** | 14 retirée des niveaux proposés. |
 
+### Tâches de fond encore comptabilisées par Home Assistant (v1.0.7)
+
+La v1.0.6 avait sorti les éventails de lecture de `sensor.py` de la comptabilité de
+Home Assistant, mais sept autres appels à `hass.async_create_task()` subsistaient dans
+les entités. Le plus gênant :
+
+```python
+self._cov_task = self.hass.async_create_task(self._async_cov_receive_loop())
+
+async def _async_cov_receive_loop(self) -> None:
+    while True:
+        ...
+```
+
+Une boucle qui ne se termine jamais, enregistrée parmi les tâches que Home Assistant
+attend à la fin de sa phase de démarrage. Relevé dans un journal, sur un démarrage où
+l'import des points s'était bien passé :
+
+```
+Setup timed out for bootstrap waiting on
+    BacnetClientPointEntityBase._async_cov_receive_loop()   × 8
+Something is blocking Home Assistant from wrapping up the start up phase
+```
+
+Les sept appels passent à `hass.async_create_background_task()`, avec un nom explicite
+par tâche.
+
+**L'annulation explicite est conservée.** `async_create_background_task` n'annule qu'à
+l'arrêt de Home Assistant ; elle ne couvre ni la suppression d'une entité ni le
+déchargement d'une entrée. Le `cancel()` suivi d'un `await`, atteint depuis
+`async_will_remove_from_hass`, reste donc en place. L'annulation automatique n'est qu'un
+filet de sécurité supplémentaire.
+
+**Écart assumé.** `__init__.py` conserve `hass.async_create_task()` pour la
+synchronisation différée des mappings : cette tâche attend un délai d'anti-rebond avant
+d'écrire, et une annulation à l'arrêt lui ferait perdre une synchronisation en attente.
+Le compromis est inverse de celui des autres tâches.
+
+| Fichier | Nature | Description |
+| --- | --- | --- |
+| `custom_components/bacnet_hub/client_point_entities.py` | **modif** | 4 tâches passées en arrière-plan : ré-enregistrement COV, boucle de réception COV, renouvellement de bail, relecture du Present Value. |
+| `custom_components/bacnet_hub/sensor_entities.py` | **modif** | 3 tâches passées en arrière-plan : ré-enregistrement COV, boucle de réception COV, renouvellement de bail. |
+
 ---
 
 ## 📜 Licence
