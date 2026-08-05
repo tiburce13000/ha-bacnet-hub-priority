@@ -1,7 +1,7 @@
 {
   "domain": "bacnet_hub",
   "name": "BACnet Hub Priority",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "documentation": "https://github.com/tiburce13000/ha-bacnet-hub-priority",
   "issue_tracker": "https://github.com/tiburce13000/ha-bacnet-hub-priority/issues",
   "codeowners": [

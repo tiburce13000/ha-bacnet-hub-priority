@@ -450,7 +450,14 @@ class BacnetClientPointSensor(SensorEntity):
 
     @callback
     def _handle_cov_reregister(self) -> None:
-        self.hass.async_create_task(self._async_reregister_cov())
+        # v1.0.7 : hass.async_create_task est comptabilisee par Home Assistant, qui
+        # attend ces taches a la fin de sa phase de demarrage. async_create_background_task
+        # ne l'est pas. L'annulation explicite existante est CONSERVEE : l'annulation
+        # automatique ne couvre que l'arret de HA, pas la suppression d'une entite.
+        self.hass.async_create_background_task(
+            self._async_reregister_cov(),
+            name=f"{DOMAIN} cov reregister {self._point_key}",
+        )
 
     async def _async_reregister_cov(self) -> None:
         try:
@@ -622,7 +629,11 @@ class BacnetClientPointSensor(SensorEntity):
             self._cov_registered = True
             self._cov_retry_not_before_ts = 0.0
             self._cov_retry_delay_seconds = 10.0
-            self._cov_task = self.hass.async_create_task(self._async_cov_receive_loop())
+            # v1.0.7 : boucle `while True`, jamais terminee. Voir client_point_entities.
+            self._cov_task = self.hass.async_create_background_task(
+                self._async_cov_receive_loop(),
+                name=f"{DOMAIN} cov receive {self._point_key}",
+            )
             self._schedule_cov_lease_reregister()
 
     def _schedule_cov_lease_reregister(self) -> None:
@@ -638,7 +649,11 @@ class BacnetClientPointSensor(SensorEntity):
         @callback
         def _lease_expired(_now) -> None:
             self._cov_lease_unsub = None
-            self.hass.async_create_task(self._async_reregister_cov())
+            # v1.0.7 : voir _handle_cov_reregister().
+            self.hass.async_create_background_task(
+                self._async_reregister_cov(),
+                name=f"{DOMAIN} cov lease renew {self._point_key}",
+            )
 
         self._cov_lease_unsub = async_call_later(self.hass, delay, _lease_expired)
 

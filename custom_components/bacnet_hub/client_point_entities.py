@@ -223,7 +223,14 @@ class BacnetClientPointEntityBase:
 
     @callback
     def _handle_cov_reregister(self) -> None:
-        self.hass.async_create_task(self._async_reregister_cov())
+        # v1.0.7 : hass.async_create_task est comptabilisee par Home Assistant, qui
+        # attend ces taches a la fin de sa phase de demarrage. async_create_background_task
+        # ne l'est pas. L'annulation explicite existante est CONSERVEE : l'annulation
+        # automatique ne couvre que l'arret de HA, pas la suppression d'une entite.
+        self.hass.async_create_background_task(
+            self._async_reregister_cov(),
+            name=f"{DOMAIN} cov reregister {self._point_key}",
+        )
 
     async def _async_reregister_cov(self) -> None:
         try:
@@ -395,7 +402,14 @@ class BacnetClientPointEntityBase:
             self._cov_retry_not_before_ts = 0.0
             self._cov_retry_delay_seconds = 10.0
             self._set_client_points_unavailable(False)
-            self._cov_task = self.hass.async_create_task(self._async_cov_receive_loop())
+            # v1.0.7 : boucle `while True` -> elle ne se termine jamais. Creee avec
+            # async_create_task, elle figurait dans la liste des taches attendues a la
+            # fin du demarrage de Home Assistant. Annulation explicite conservee dans
+            # _async_stop_cov_runtime().
+            self._cov_task = self.hass.async_create_background_task(
+                self._async_cov_receive_loop(),
+                name=f"{DOMAIN} cov receive {self._point_key}",
+            )
             self._schedule_cov_lease_reregister()
 
     def _schedule_cov_lease_reregister(self) -> None:
@@ -417,7 +431,11 @@ class BacnetClientPointEntityBase:
         @callback
         def _lease_expired(_now) -> None:
             self._cov_lease_unsub = None
-            self.hass.async_create_task(self._async_reregister_cov())
+            # v1.0.7 : voir _handle_cov_reregister().
+            self.hass.async_create_background_task(
+                self._async_reregister_cov(),
+                name=f"{DOMAIN} cov lease renew {self._point_key}",
+            )
 
         self._cov_lease_unsub = async_call_later(self.hass, delay, _lease_expired)
 
@@ -501,11 +519,19 @@ class BacnetClientPointEntityBase:
         Non bloquant : le service HA (`set_value`, `select_option`, `press`…) rend la
         main immédiatement, la relecture se fait en tâche de fond.
 
-        Appelé depuis l'event loop (services d'entité) -> `hass.async_create_task`.
+        Appelé depuis l'event loop (services d'entité).
         NE PAS utiliser `hass.create_task`, qui retourne `None`.
+
+        v1.0.7 : `async_create_background_task` — cette tâche dort 0,5 s puis 3,0 s
+        (REFRESH_AFTER_WRITE_DELAYS) avant de rendre la main. Comptabilisée par HA,
+        elle retenait la fin de la phase de démarrage. Son annulation à l'arrêt est
+        sans conséquence : c'est un rafraîchissement d'affichage.
         """
         try:
-            task = self.hass.async_create_task(self._async_refresh_present_value())
+            task = self.hass.async_create_background_task(
+                self._async_refresh_present_value(),
+                name=f"{DOMAIN} present value refresh {self._point_key}",
+            )
         except BaseException:
             _LOGGER.debug(
                 "Planification de la relecture impossible pour %s",
