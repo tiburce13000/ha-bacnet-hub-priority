@@ -1300,6 +1300,142 @@ async def _read_client_runtime(
     }
 
 
+# ---------------------------------------------------------------------------
+# v1.1.0 — Lecture du Priority Array à la demande
+# ---------------------------------------------------------------------------
+
+PRIORITY_ARRAY_SIZE = 16
+
+# Délai par point. Doit rester au-dessus du budget de transaction bacpypes3
+# (apduTimeout × (1 + numberOfApduRetries) = 4,0 s), cf. v1.0.6.
+CLIENT_PRIORITY_ARRAY_TIMEOUT_SECONDS = 6.0
+
+
+def _normalize_priority_value(item: Any) -> float | None:
+    """Réduit un `PriorityValue` bacpypes3 à un `float` ou `None`.
+
+    Un `PriorityValue` est un *choice* : `null`, `real`, `binary`, `integer`…
+    Le cas `null` (niveau libre) doit ressortir en `None`, et non en `0.0` —
+    confondre les deux rendrait un niveau libre indiscernable d'une commande à
+    zéro, ce qui est exactement l'information recherchée.
+    """
+    if item is None:
+        return None
+
+    # bacpypes3 expose les branches du choice en attributs ; seule celle qui est
+    # renseignée est non nulle.
+    for attr in ("real", "integer", "unsigned", "binaryValue", "enumerated", "double"):
+        value = getattr(item, attr, None)
+        if value is not None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+    if getattr(item, "null", None) is not None:
+        return None
+
+    # Certaines piles renvoient directement un scalaire.
+    if isinstance(item, (int, float)) and not isinstance(item, bool):
+        return float(item)
+    if isinstance(item, bool):
+        return float(int(item))
+
+    text = str(item).strip().lower()
+    if text in ("", "null", "none"):
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _normalize_priority_array(raw: Any) -> list[float | None] | None:
+    """Normalise un Priority Array brut en 16 valeurs `None` / `float`.
+
+    Renvoie **`None` franc** si la donnée est inexploitable — jamais `[]` ni
+    `[None] * 16`. C'est la condition pour que `_merge_non_none` protège la
+    valeur précédente : le piège de la v1.0.4 était précisément un repli non nul
+    (`has_priority_array` en `bool`, `object_name` avec valeur par défaut), que
+    cette protection ne voyait pas.
+    """
+    if raw is None:
+        return None
+    try:
+        items = list(raw)
+    except TypeError:
+        return None
+    if not items:
+        return None
+
+    values = [_normalize_priority_value(item) for item in items[:PRIORITY_ARRAY_SIZE]]
+    # Un automate peut renvoyer moins de 16 niveaux ; on complète pour que
+    # l'index reste la priorité BACnet.
+    while len(values) < PRIORITY_ARRAY_SIZE:
+        values.append(None)
+    return values
+
+
+async def _read_client_point_priority_array(
+    app: Any,
+    address: str,
+    object_identifier: str,
+) -> list[float | None] | None:
+    """Lit le Priority Array d'un point commandable. `None` si la lecture échoue.
+
+    Deux passes :
+
+    1. lecture du tableau entier en une requête ;
+    2. si elle échoue, lecture **niveau par niveau** via `array_index`.
+
+    La seconde passe existe pour les automates dont la réponse complète dépasse
+    `Max Apdu Length Accepted` alors que `Segmentation Supported = None` — cas qui
+    produit un `Abort from device: 6` (SEGMENTATION_NOT_SUPPORTED). 16 `Real`
+    tiennent normalement dans 480 octets, mais le repli évite d'en dépendre.
+    Elle coûte 16 aller-retours : à ne déclencher qu'en dernier recours.
+    """
+    try:
+        raw = await _read_remote_property(
+            app,
+            address,
+            object_identifier,
+            "priorityArray",
+            timeout=CLIENT_PRIORITY_ARRAY_TIMEOUT_SECONDS,
+        )
+    except asyncio.CancelledError:
+        raise
+    except BaseException:
+        raw = None
+
+    values = _normalize_priority_array(raw)
+    if values is not None:
+        return values
+
+    # Repli séquentiel. L'index BACnet démarre à 1.
+    per_index: list[float | None] = []
+    read_ok = False
+    for index in range(1, PRIORITY_ARRAY_SIZE + 1):
+        try:
+            item = await _read_remote_property(
+                app,
+                address,
+                object_identifier,
+                "priorityArray",
+                array_index=index,
+                timeout=CLIENT_PRIORITY_ARRAY_TIMEOUT_SECONDS,
+            )
+        except asyncio.CancelledError:
+            raise
+        except BaseException:
+            per_index.append(None)
+            continue
+        read_ok = True
+        per_index.append(_normalize_priority_value(item))
+
+    # Aucun niveau lu : échec franc, la valeur précédente sera conservée.
+    return per_index if read_ok else None
+
+
 async def _read_client_point_payload(
     app: Any,
     address: str,
