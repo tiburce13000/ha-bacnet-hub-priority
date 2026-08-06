@@ -393,13 +393,12 @@ rendait invisibles à la protection `_merge_non_none`.
 diagnostic ; aucun chemin d'écriture ne l'appelle. C'est l'acquis de la v1.0.5, payé au
 prix d'une régression silencieuse en v1.0.4.
 
-**Transport.** La lecture se fait en une requête pour le tableau entier. Si elle échoue,
-un repli lit niveau par niveau via `array_index` — pour les automates dont la réponse
-complète dépasse `Max Apdu Length Accepted` alors que `Segmentation Supported = None`,
-cas qui produit un `Abort from device: 6`. Ce repli coûte 16 aller-retours et ne se
-déclenche qu'en dernier recours. Les points sont lus **séquentiellement**, avec 0,2 s
-entre chacun : sur une liaison MS/TP, des requêtes simultanées vers un même automate
-allongent les aller-retours au lieu de les raccourcir.
+**Transport.** La lecture se fait en une requête pour le tableau entier. Les points sont
+lus **séquentiellement**, avec 0,2 s entre chacun : sur une liaison MS/TP, des requêtes
+simultanées vers un même automate allongent les aller-retours au lieu de les raccourcir.
+
+> La v1.1.0 comportait en plus un repli lisant les 16 niveaux un par un via `array_index`.
+> Il a été **retiré en v1.2.0** — voir la section suivante.
 
 **Le bouton est désactivé par défaut**, comme le sélecteur de priorité et le bouton
 « Relâcher ». Catégorie diagnostic.
@@ -409,6 +408,63 @@ allongent les aller-retours au lieu de les raccourcir.
 | `custom_components/bacnet_hub/priority_array_button.py` | **nouveau** | Bouton de lecture, un par device. |
 | `custom_components/bacnet_hub/client_runtime.py` | **modif** | Normalisation des `PriorityValue`, lecture avec repli par index. |
 | `custom_components/bacnet_hub/button.py` | **modif** | Création du bouton par device. |
+
+### Lecture restreinte aux entités activées (v1.2.0)
+
+Le bouton de la v1.1.0 lisait **tous** les points commandables du device. Sur un automate
+qui expose des dizaines de valeurs analogiques, cela revenait à parcourir des objets pour
+lesquels aucune entité n'a jamais été créée — un long aller-retour série pour une donnée
+que personne n'a demandée.
+
+La lecture ne couvre désormais que les points dont **l'entité de valeur est activée** dans
+Home Assistant : `number`, `select`, `switch`, ou `sensor` lorsqu'un point bascule en
+lecture seule.
+
+- **Aucune option de configuration nouvelle.** Activer ou désactiver une entité de point
+  suffit à la faire entrer ou sortir de la lecture.
+- Le bouton « Relâcher » d'un point porte le **même identifiant unique suffixé de
+  `-release`** : une comparaison par égalité stricte l'exclut d'office, sans avoir à
+  filtrer par domaine.
+- Quand aucun point commandable n'est activé, `errors` rapporte
+  `no_enabled_commandable_point` et un avertissement est journalisé.
+
+Mesuré sur un automate exposant 59 objets commandables, dont 9 avaient une entité
+activée : **59 objets parcourus en 60 s avant, 9 objets en environ 2 s après**.
+
+### Repli par `array_index` retiré (v1.2.0)
+
+La v1.1.0 se rabattait sur une lecture niveau par niveau dès que la lecture du tableau
+entier échouait :
+
+```python
+values = _normalize_priority_array(raw)
+if values is not None:
+    return values
+
+# repli : 16 aller-retours
+for index in range(1, PRIORITY_ARRAY_SIZE + 1):
+    item = await _read_remote_property(..., array_index=index, ...)
+```
+
+Ce repli visait les automates dont la réponse complète dépasse
+`Max APDU Length Accepted` alors que `Segmentation Supported = None`, cas qui produit un
+`Abort from device: 6`. Mais il se déclenchait sur **toute** erreur de lecture — y compris
+le cas bien plus fréquent d'un objet ne possédant tout simplement pas de propriété
+`priorityArray`.
+
+Sur une seule pression couvrant 27 objets de ce type, cela représentait environ
+**430 aller-retours inutiles** sur un segment MS/TP, et 27 entrées dans `errors` qui
+n'apportaient aucune information.
+
+Le repli est supprimé. Un échec de lecture est désormais un échec franc : la fonction
+renvoie `None`, la photo précédente du point est conservée, et `errors` le signale. Seize
+valeurs `Real` tiennent dans 480 octets ; un automate incapable de répondre à la lecture du
+tableau entier n'a de toute façon pas de Priority Array exploitable à rapporter.
+
+| Fichier | Nature | Description |
+| --- | --- | --- |
+| `custom_components/bacnet_hub/priority_array_button.py` | **modif** | Portée de lecture limitée aux entités activées, message `no_enabled_commandable_point`. |
+| `custom_components/bacnet_hub/client_runtime.py` | **modif** | Repli par `array_index` retiré, lecture en une seule passe. |
 
 ### Comportement du bouton « Relâcher » — à connaître
 
