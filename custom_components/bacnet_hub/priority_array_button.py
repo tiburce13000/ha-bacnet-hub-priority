@@ -8,7 +8,18 @@ figure dans les propriétés demandées à l'import) mais elle était réduite �
 booléen puis jetée.
 
 Ce bouton en fait une **photo à la demande** : à la pression, il lit le Priority
-Array de tous les points commandables du device et l'expose en attributs.
+Array des points commandables du device et l'expose en attributs.
+
+**Portée de la lecture (v1.2.0).** Seuls les points dont l'entité de valeur est
+**activée** dans Home Assistant sont lus. La v1.1.0 lisait tous les points
+commandables du device, y compris les dizaines d'objets qu'un automate expose
+sans qu'aucune entité ne soit créée pour eux : lecture interminable sur un bus
+série, et attribut `errors` noyé sous des échecs sans intérêt.
+
+Le critère est l'entité, pas une liste figée : activer ou désactiver une entité
+de point suffit à la faire entrer ou sortir de la lecture, sans reconfiguration.
+Le bouton Relâcher porte le même identifiant unique suffixé de `-release`, il
+n'entre donc jamais dans la comparaison.
 
 Deux règles de conception, héritées de la régression v1.0.4 :
 
@@ -32,6 +43,7 @@ from typing import Any
 
 from homeassistant.components.button import ButtonEntity
 from homeassistant.core import callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 
@@ -41,8 +53,10 @@ from .client_runtime import (
     _client_cache_get,
     _client_points_signal,
     _entry_client_points,
+    _point_unique_id,
     _read_client_point_priority_array,
     _safe_text,
+    _to_int,
 )
 from .release_button_entity import COMMANDABLE_TYPE_SLUGS
 
@@ -120,15 +134,45 @@ class BacnetClientPriorityArrayButton(ButtonEntity):
         """Le nom du device peut avoir changé ; rien à recalculer ici."""
         self.async_write_ha_state()
 
+    def _enabled_point_unique_ids(self) -> set[str]:
+        """Identifiants uniques des entités actuellement activées pour l'entrée.
+
+        Comparaison par égalité stricte : le bouton Relâcher d'un point porte le
+        même identifiant suffixé de `-release`, il est donc exclu sans avoir à
+        filtrer par domaine. Cela laisse en revanche entrer l'entité de valeur
+        quel que soit son domaine — `number`, `select`, `switch`, ou `sensor`
+        lorsqu'un point bascule en lecture seule.
+        """
+        registry = er.async_get(self.hass)
+        return {
+            entity.unique_id
+            for entity in er.async_entries_for_config_entry(registry, self._entry_id)
+            if entity.disabled_by is None
+        }
+
     def _commandable_points(self) -> list[tuple[str, dict[str, Any]]]:
+        """Points commandables du device dont l'entité de valeur est activée."""
+        enabled_unique_ids = self._enabled_point_unique_ids()
         per_entry = _entry_client_points(self.hass, self._entry_id)
         point_cache = per_entry.get(self._client_id) or {}
         result: list[tuple[str, dict[str, Any]]] = []
         for point_key, point in sorted(point_cache.items()):
             data = dict(point or {})
             type_slug = str(data.get("type_slug") or "").strip().lower()
-            if type_slug in COMMANDABLE_TYPE_SLUGS:
-                result.append((str(point_key), data))
+            if type_slug not in COMMANDABLE_TYPE_SLUGS:
+                continue
+
+            object_instance = _to_int(data.get("object_instance"))
+            if object_instance is None:
+                continue
+
+            unique_id = _point_unique_id(
+                self._entry_id, self._client_id, type_slug, int(object_instance)
+            )
+            if unique_id not in enabled_unique_ids:
+                continue
+
+            result.append((str(point_key), data))
         return result
 
     async def async_press(self) -> None:
@@ -153,8 +197,14 @@ class BacnetClientPriorityArrayButton(ButtonEntity):
 
         points = self._commandable_points()
         if not points:
-            self._errors = ["no_commandable_point"]
+            # Soit le device n'expose aucun point commandable, soit aucune de
+            # leurs entités n'est activée. Le second cas est le plus probable.
+            self._errors = ["no_enabled_commandable_point"]
             self.async_write_ha_state()
+            _LOGGER.warning(
+                "Priority Array : aucun point commandable activé pour %s",
+                self._client_id,
+            )
             return
 
         self._reading = True

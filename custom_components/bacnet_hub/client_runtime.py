@@ -1383,16 +1383,19 @@ async def _read_client_point_priority_array(
 ) -> list[float | None] | None:
     """Lit le Priority Array d'un point commandable. `None` si la lecture échoue.
 
-    Deux passes :
+    Une seule requête, une seule passe.
 
-    1. lecture du tableau entier en une requête ;
-    2. si elle échoue, lecture **niveau par niveau** via `array_index`.
+    v1.1.0 comportait un repli lisant les 16 niveaux un par un via `array_index`.
+    Il visait les automates dont la réponse complète dépasse
+    `Max Apdu Length Accepted` alors que `Segmentation Supported = None`
+    (`Abort from device: 6`). Ce cas ne s'est jamais présenté, alors que le repli
+    se déclenchait sur **toute** erreur de lecture — y compris, et surtout, sur
+    les objets ne possédant tout simplement pas de propriété `priorityArray`.
+    Chacun de ces objets coûtait alors 16 aller-retours inutiles sur un bus
+    série. Repli retiré en v1.2.0 : un échec est désormais un échec franc.
 
-    La seconde passe existe pour les automates dont la réponse complète dépasse
-    `Max Apdu Length Accepted` alors que `Segmentation Supported = None` — cas qui
-    produit un `Abort from device: 6` (SEGMENTATION_NOT_SUPPORTED). 16 `Real`
-    tiennent normalement dans 480 octets, mais le repli évite d'en dépendre.
-    Elle coûte 16 aller-retours : à ne déclencher qu'en dernier recours.
+    16 `Real` tiennent dans 480 octets ; un automate qui ne sait pas répondre à
+    cette lecture n'a pas de Priority Array exploitable de toute façon.
     """
     try:
         raw = await _read_remote_property(
@@ -1405,35 +1408,11 @@ async def _read_client_point_priority_array(
     except asyncio.CancelledError:
         raise
     except BaseException:
-        raw = None
+        return None
 
-    values = _normalize_priority_array(raw)
-    if values is not None:
-        return values
-
-    # Repli séquentiel. L'index BACnet démarre à 1.
-    per_index: list[float | None] = []
-    read_ok = False
-    for index in range(1, PRIORITY_ARRAY_SIZE + 1):
-        try:
-            item = await _read_remote_property(
-                app,
-                address,
-                object_identifier,
-                "priorityArray",
-                array_index=index,
-                timeout=CLIENT_PRIORITY_ARRAY_TIMEOUT_SECONDS,
-            )
-        except asyncio.CancelledError:
-            raise
-        except BaseException:
-            per_index.append(None)
-            continue
-        read_ok = True
-        per_index.append(_normalize_priority_value(item))
-
-    # Aucun niveau lu : échec franc, la valeur précédente sera conservée.
-    return per_index if read_ok else None
+    # `None` franc si la donnée est inexploitable : la photo précédente du point
+    # est alors conservée par l'appelant.
+    return _normalize_priority_array(raw)
 
 
 async def _read_client_point_payload(
